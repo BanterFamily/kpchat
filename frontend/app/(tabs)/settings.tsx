@@ -73,7 +73,7 @@ export default function SettingsScreen() {
         </View>
         <View style={{ flex: 1 }}>
           <Text style={[styles.name, { color: colors.onSurface }]}>{user?.name}</Text>
-          <Text style={[styles.email, { color: colors.muted }]}>{user?.email}</Text>
+          <Text style={[styles.email, { color: colors.muted }]}>{user?.phone}</Text>
         </View>
         <Ionicons name="chevron-forward" size={20} color={colors.muted} />
       </Pressable>

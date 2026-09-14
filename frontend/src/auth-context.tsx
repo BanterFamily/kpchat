@@ -1,11 +1,13 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { apiFetch, clearToken, readToken, saveToken, User } from "./api";
 
+type OtpRequestResp = { phone: string; expires_in: number; dev_code?: string | null };
+
 type AuthCtx = {
   user: User | null;
   ready: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, name: string) => Promise<void>;
+  requestOtp: (phone: string, purpose: "register" | "login", name?: string) => Promise<OtpRequestResp>;
+  verifyOtp: (phone: string, code: string, name?: string) => Promise<User>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   setUser: (u: User | null) => void;
@@ -33,19 +35,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     (async () => { await refresh(); setReady(true); })();
   }, [refresh]);
 
-  const login = async (email: string, password: string) => {
-    const r = await apiFetch("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+  const requestOtp = async (phone: string, purpose: "register" | "login", name?: string) => {
+    return apiFetch("/auth/otp/request", {
+      method: "POST",
+      body: JSON.stringify({ phone, purpose, name }),
+    });
+  };
+
+  const verifyOtp = async (phone: string, code: string, name?: string) => {
+    const r = await apiFetch("/auth/otp/verify", {
+      method: "POST",
+      body: JSON.stringify({ phone, code, name }),
+    });
     await saveToken(r.access_token);
     setUser(r.user);
+    return r.user as User;
   };
-  const register = async (email: string, password: string, name: string) => {
-    const r = await apiFetch("/auth/register", { method: "POST", body: JSON.stringify({ email, password, name }) });
-    await saveToken(r.access_token);
-    setUser(r.user);
-  };
+
   const logout = async () => { await clearToken(); setUser(null); };
 
-  return <Ctx.Provider value={{ user, ready, login, register, logout, refresh, setUser }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ user, ready, requestOtp, verifyOtp, logout, refresh, setUser }}>
+      {children}
+    </Ctx.Provider>
+  );
 }
 
 export function useAuth() { return useContext(Ctx); }

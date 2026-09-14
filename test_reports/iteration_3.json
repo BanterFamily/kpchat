@@ -1,0 +1,42 @@
+{
+  "summary": "KPChat migration (email/pw -> phone+OTP mock) tested end-to-end. Backend: 14/14 pytest cases pass (test_kpchat_phone_otp.py) covering GET /api/ (status/app/mock_sms), POST /auth/otp/request (register happy path returns dev_code+expires_in=300, 409 on already-registered, 404 on unregistered-login, 429 within 30s cooldown, E.164 normalization for '+62 812 3456 XXXX' and '628XXXXXXXXX', 400 on malformed '123'), POST /auth/otp/verify (wrong-code 400 + attempt increment, 5 wrong -> 429 lockout, single-use, TokenOut shape with UserOut{id,phone,name,about,avatar_path,online,last_seen}, name creation on first register), GET/PATCH /auth/me (returns phone not email, updates name+about), and legacy /chats + /messages still work with phone-based users. Frontend Expo web at 390x844: Login screen shows 'KPChat' brand in blue (#0084FF) and login-phone-input testID; submitting +6289000XXXXX (unregistered) surfaces 'Nomor belum terdaftar. Silakan daftar dulu.' in login-error. go-to-register -> register-name-input + register-phone-input -> register-submit-button navigates to Verify screen; dev-code-hint block shows 'Mode Demo' + 6-digit code; autofill-code copies code into verify-code-input; verify-submit-button lands on chats-screen (blue KPChat CTA 'Mulai chat baru' visible). Settings screen renders phone (+6281275924014) directly under the name (no email anywhere). resend-code shows 'Kirim ulang dalam Ns' countdown (not exercised past 0s to avoid 30s wait). Theme brandPrimary=#0084FF confirmed on login CTA, register CTA, chats FAB/CTA. Deprecated packages check: NONE (expo-audio, expo-camera in use; expo-av/expo-barcode-scanner/expo-background-fetch not present). Non-blocking console warning still: '\"shadow*\" style props are deprecated. Use \"boxShadow\"' (pre-existing from iter1/iter2).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "global", "issues": ["Pre-existing RN-Web console warning: 'shadow* deprecated, use boxShadow' (non-blocking; already flagged in iter1/iter2)."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_kpchat_phone_otp.py",
+    "/app/backend/tests/test_reactions_reply_audio.py",
+    "/app/test_reports/pytest/iter3_results.xml"
+  ],
+  "action_items": [
+    "None blocking. (Optional cosmetic) Silence RN-Web shadow* deprecation warnings by migrating to style.boxShadow."
+  ],
+  "critical_code_review_comments": [
+    "server.py: normalize_phone strips whitespace/(-)/() and prepends + (stripping leading 0) then enforces E.164 regex ^\\+[1-9]\\d{7,14}$ — correct, matches spec.",
+    "OTP is bcrypt-hashed at rest (hash_code/verify_code) and expires_at is indexed with TTL via db.otps.create_index expireAfterSeconds=0 — good.",
+    "OTP_COOLDOWN_SECONDS=30 enforced by finding latest otp doc per phone; delete_many then insert_one guarantees single active OTP per phone.",
+    "verify_otp: increments attempts on wrong code, deletes doc on success (single-use), returns 400 on missing/expired otp and 429 at MAX_VERIFY_ATTEMPTS=5 — matches all backend test cases.",
+    "TokenOut returns UserOut with phone (no email field) — matches UserOut model; users collection has unique index on phone.",
+    "Legacy email-based fixtures in old backend_test.py were incompatible; DELETED /app/backend/tests/backend_test.py and replaced with test_kpchat_phone_otp.py. Existing test_reactions_reply_audio.py still references email/password login helper — will need refactor when reactions/reply retest is needed; flagged for next iter.",
+    "server.py grew to 779 lines — exceeds 700-line guideline; consider splitting into auth.py / chats.py / messages.py / files.py / ws.py modules.",
+    "Frontend: theme.ts brandPrimary #0084FF (light) and #0A84FF (dark) — light matches spec exactly.",
+    "verify.tsx uses initial cooldown=30 on mount and 30 on resend — matches backend OTP_COOLDOWN_SECONDS=30.",
+    "settings.tsx renders user?.phone directly (styles.email kept as class name but content is phone) — visual result correct."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_kpchat_phone_otp.py (created — 14 tests)",
+    "/app/backend/tests/backend_test.py (deleted — obsolete email/password suite)"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% on tested flows (login-unregistered error, register->verify autofill->chats, settings-phone-visible, KPChat brand + blue theme)"},
+  "seed_data_creation": "Created ~10 fresh users via OTP flow with TEST_* names and time-based phone numbers (+628…). No cleanup performed; unique-per-run so no interference.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Legacy /app/backend/tests/test_reactions_reply_audio.py still uses old email/password login helper — will fail if re-run. If reactions/reply retest is needed, refactor that file to use OTP register+verify helpers from test_kpchat_phone_otp.py (_register_and_login()). Testable phone must be a unique +628XXXXXXXX per run (E.164, 8-15 digits after +). OTP dev_code returned in POST /api/auth/otp/request response.dev_code AND rendered in Verify screen dev-code-hint. Cooldown = 30s between requests for the SAME phone; use different phones for back-to-back tests. Frontend testIDs: login-phone-input, login-submit-button, login-error, go-to-register, register-name-input, register-phone-input, register-submit-button, register-error, verify-code-input, verify-submit-button, verify-error, dev-code-hint, autofill-code, resend-code, verify-back, chats-screen, settings-screen, tab-settings, logout-button, avatar-picker, about-input, save-about, edit-about.",
+  "rca_of_issue": "N/A — no bugs found; migration to phone+OTP mock is complete and fully functional across backend and frontend."
+}

@@ -2,7 +2,7 @@ import { Platform } from "react-native";
 import * as SecureStore from "expo-secure-store";
 
 export const API_BASE = process.env.EXPO_PUBLIC_BACKEND_URL as string;
-const TOKEN_KEY = "wa_token";
+const TOKEN_KEY = "kpchat_token";
 
 export async function saveToken(t: string) {
   if (Platform.OS === "web") localStorage.setItem(TOKEN_KEY, t);
@@ -60,7 +60,7 @@ export async function fileUrl(path: string): Promise<string> {
 
 export type User = {
   id: string;
-  email: string;
+  phone: string;
   name: string;
   about: string;
   avatar_path: string | null;

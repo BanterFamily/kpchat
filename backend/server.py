@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import os
+import re
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,7 +29,7 @@ from fastapi import (
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
@@ -107,9 +109,11 @@ api = APIRouter(prefix="/api")
 
 @app.on_event("startup")
 async def startup():
-    await db.users.create_index("email", unique=True)
+    await db.users.create_index("phone", unique=True)
     await db.messages.create_index([("chat_id", 1), ("created_at", 1)])
     await db.chats.create_index("member_ids")
+    await db.otps.create_index("expires_at", expireAfterSeconds=0)
+    await db.otps.create_index([("phone", 1), ("created_at", -1)])
     try:
         if EMERGENT_KEY:
             await run_in_threadpool(_init_storage_sync)
@@ -124,20 +128,27 @@ async def shutdown():
 
 
 # ----------------------------- MODELS ----------------------------- #
-class RegisterIn(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=6, max_length=72)
-    name: str = Field(min_length=1, max_length=60)
+class OTPRequestIn(BaseModel):
+    phone: str = Field(min_length=2, max_length=32)
+    purpose: Literal["register", "login"]
+    name: Optional[str] = Field(default=None, max_length=60)
 
 
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=1, max_length=72)
+class OTPVerifyIn(BaseModel):
+    phone: str = Field(min_length=2, max_length=32)
+    code: str = Field(pattern=r"^\d{6}$")
+    name: Optional[str] = Field(default=None, max_length=60)
+
+
+class OTPRequestOut(BaseModel):
+    phone: str
+    expires_in: int
+    dev_code: Optional[str] = None
 
 
 class UserOut(BaseModel):
     id: str
-    email: EmailStr
+    phone: str
     name: str
     about: str
     avatar_path: Optional[str] = None
@@ -210,15 +221,58 @@ class MessageOut(BaseModel):
 
 
 # ----------------------------- HELPERS ----------------------------- #
-def hash_password(p: str) -> str:
-    return bcrypt.hashpw(p.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+OTP_TTL_SECONDS = 300
+OTP_COOLDOWN_SECONDS = 30
+MAX_VERIFY_ATTEMPTS = 5
 
 
-def verify_password(p: str, h: str) -> bool:
+def normalize_phone(value: str) -> str:
+    phone = re.sub(r"[\s\-()]+", "", (value or "").strip())
+    if not phone:
+        raise HTTPException(status_code=400, detail="Nomor telepon wajib diisi")
+    if not phone.startswith("+"):
+        phone = "+" + phone.lstrip("0")
+    if not E164_RE.match(phone):
+        raise HTTPException(status_code=400, detail="Nomor telepon tidak valid (gunakan format E.164, contoh: +6281234567890)")
+    return phone
+
+
+def hash_code(c: str) -> str:
+    return bcrypt.hashpw(c.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_code(c: str, h: str) -> bool:
     try:
-        return bcrypt.checkpw(p.encode("utf-8"), h.encode("utf-8"))
+        return bcrypt.checkpw(c.encode("utf-8"), h.encode("utf-8"))
     except Exception:
         return False
+
+
+def is_mock_sms() -> bool:
+    return not (os.environ.get("TWILIO_ACCOUNT_SID") or "").strip()
+
+
+async def send_sms_or_mock(phone: str, code: str) -> Optional[str]:
+    """Return dev_code in mock mode; return None when real SMS is sent."""
+    if is_mock_sms():
+        return code
+    # Placeholder Twilio integration seam.
+    sid = os.environ["TWILIO_ACCOUNT_SID"]
+    auth = os.environ.get("TWILIO_AUTH_TOKEN")
+    sender = os.environ.get("TWILIO_FROM")
+    if not auth or not sender:
+        raise HTTPException(status_code=500, detail="Twilio belum dikonfigurasi lengkap")
+    try:
+        from twilio.rest import Client  # type: ignore
+    except ImportError:
+        raise HTTPException(status_code=500, detail="Paket twilio belum terpasang")
+    await run_in_threadpool(
+        lambda: Client(sid, auth).messages.create(
+            body=f"Kode verifikasi KPChat kamu: {code}", from_=sender, to=phone
+        )
+    )
+    return None
 
 
 def create_token(user_id: str) -> str:
@@ -238,9 +292,9 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
 def user_to_out(u: dict) -> UserOut:
     return UserOut(
         id=u["id"],
-        email=u["email"],
+        phone=u["phone"],
         name=u["name"],
-        about=u.get("about", "Hey there! I am using WA-Clone."),
+        about=u.get("about", "Hai! Saya menggunakan KPChat."),
         avatar_path=u.get("avatar_path"),
         online=bool(u.get("online", False)),
         last_seen=_iso(u.get("last_seen")),
@@ -275,38 +329,78 @@ def _decode_token_or_none(token: Optional[str]) -> Optional[str]:
 # ----------------------------- AUTH ROUTES ----------------------------- #
 @api.get("/")
 async def root():
-    return {"status": "ok", "app": "whatsapp-clone"}
+    return {"status": "ok", "app": "kpchat", "mock_sms": is_mock_sms()}
 
 
-@api.post("/auth/register", response_model=TokenOut)
-async def register(body: RegisterIn):
-    email = body.email.lower().strip()
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        raise HTTPException(status_code=409, detail="Email already registered")
-    user_id = str(uuid.uuid4())
-    doc = {
-        "id": user_id,
-        "email": email,
-        "name": body.name.strip(),
-        "password_hash": hash_password(body.password),
-        "about": "Hey there! I am using WA-Clone.",
-        "avatar_path": None,
-        "online": False,
-        "last_seen": datetime.now(timezone.utc),
-        "created_at": datetime.now(timezone.utc),
-    }
-    await db.users.insert_one(doc)
-    token = create_token(user_id)
-    return TokenOut(access_token=token, user=user_to_out(doc))
+@api.post("/auth/otp/request", response_model=OTPRequestOut)
+async def request_otp(body: OTPRequestIn):
+    phone = normalize_phone(body.phone)
+    now = datetime.now(timezone.utc)
+
+    existing_user = await db.users.find_one({"phone": phone}, {"_id": 0})
+    if body.purpose == "login" and not existing_user:
+        raise HTTPException(status_code=404, detail="Nomor belum terdaftar. Silakan daftar dulu.")
+    if body.purpose == "register" and existing_user:
+        raise HTTPException(status_code=409, detail="Nomor sudah terdaftar. Silakan login.")
+
+    latest = await db.otps.find_one({"phone": phone}, sort=[("created_at", -1)])
+    if latest and (now - latest["created_at"].replace(tzinfo=timezone.utc)).total_seconds() < OTP_COOLDOWN_SECONDS:
+        raise HTTPException(status_code=429, detail="Tunggu 30 detik sebelum meminta kode lagi.")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires = now + timedelta(seconds=OTP_TTL_SECONDS)
+    await db.otps.delete_many({"phone": phone})
+    await db.otps.insert_one({
+        "phone": phone,
+        "code_hash": hash_code(code),
+        "purpose": body.purpose,
+        "pending_name": (body.name or "").strip() or None,
+        "created_at": now,
+        "expires_at": expires,
+        "attempts": 0,
+    })
+
+    dev_code = await send_sms_or_mock(phone, code)
+    return OTPRequestOut(phone=phone, expires_in=OTP_TTL_SECONDS, dev_code=dev_code)
 
 
-@api.post("/auth/login", response_model=TokenOut)
-async def login(body: LoginIn):
-    email = body.email.lower().strip()
-    user = await db.users.find_one({"email": email}, {"_id": 0})
-    if not user or not verify_password(body.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+@api.post("/auth/otp/verify", response_model=TokenOut)
+async def verify_otp(body: OTPVerifyIn):
+    phone = normalize_phone(body.phone)
+    now = datetime.now(timezone.utc)
+    otp = await db.otps.find_one({"phone": phone}, sort=[("created_at", -1)])
+    if not otp:
+        raise HTTPException(status_code=400, detail="Kode tidak valid atau sudah kedaluwarsa")
+    if otp["expires_at"].replace(tzinfo=timezone.utc) <= now:
+        raise HTTPException(status_code=400, detail="Kode sudah kedaluwarsa")
+    if otp.get("attempts", 0) >= MAX_VERIFY_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Terlalu banyak percobaan. Minta kode baru.")
+
+    if not verify_code(body.code, otp["code_hash"]):
+        await db.otps.update_one({"_id": otp["_id"]}, {"$inc": {"attempts": 1}})
+        raise HTTPException(status_code=400, detail="Kode tidak valid")
+
+    # one-time use
+    await db.otps.delete_one({"_id": otp["_id"]})
+
+    user = await db.users.find_one({"phone": phone}, {"_id": 0})
+    if not user:
+        display_name = (body.name or otp.get("pending_name") or "").strip()
+        if not display_name:
+            raise HTTPException(status_code=400, detail="Nama wajib diisi untuk akun baru")
+        user_id = str(uuid.uuid4())
+        user = {
+            "id": user_id,
+            "phone": phone,
+            "name": display_name,
+            "about": "Hai! Saya menggunakan KPChat.",
+            "avatar_path": None,
+            "online": False,
+            "last_seen": now,
+            "created_at": now,
+        }
+        await db.users.insert_one(user)
+
     token = create_token(user["id"])
     return TokenOut(access_token=token, user=user_to_out(user))
 

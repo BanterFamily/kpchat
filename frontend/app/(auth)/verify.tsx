@@ -9,6 +9,7 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import { useAuth } from "@/src/auth-context";
 import { useTheme, spacing, radius } from "@/src/theme";
 import { wsClient } from "@/src/ws";
+import { AppLogo } from "@/src/components/AppLogo";
 
 export default function VerifyScreen() {
   const { verifyOtp, requestOtp } = useAuth();
@@ -66,9 +67,8 @@ export default function VerifyScreen() {
           <Ionicons name="chevron-back" size={28} color={colors.brandPrimary} />
         </Pressable>
 
-        <View style={[styles.logoWrap, { backgroundColor: colors.brandPrimary }]}>
-          <Ionicons name="shield-checkmark" size={38} color={colors.onBrandPrimary} />
-        </View>
+        <AppLogo size={80} />
+        <Text style={[styles.brand, { color: colors.brandPrimary }]}>KPChat</Text>
         <Text style={[styles.title, { color: colors.onSurface }]}>Verifikasi Nomor</Text>
         <Text style={[styles.subtitle, { color: colors.muted }]}>
           Kode 6-digit dikirim ke{"\n"}
@@ -102,6 +102,9 @@ export default function VerifyScreen() {
               keyboardType="number-pad"
               autoFocus
               maxLength={6}
+              autoComplete={Platform.OS === "android" ? "sms-otp" : "one-time-code" as any}
+              textContentType="oneTimeCode"
+              importantForAutofill="yes"
               style={[styles.input, { color: colors.onSurface, letterSpacing: 4, textAlign: "center", fontSize: 20 }]}
             />
           </View>
@@ -137,6 +140,7 @@ const styles = StyleSheet.create({
   scroll: { flexGrow: 1, paddingHorizontal: spacing.xl },
   backBtn: { alignSelf: "flex-start", padding: spacing.xs, marginBottom: spacing.md },
   logoWrap: { width: 76, height: 76, borderRadius: radius.pill, alignItems: "center", justifyContent: "center", alignSelf: "center", marginBottom: spacing.lg },
+  brand: { fontSize: 28, fontWeight: "800", textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.md, letterSpacing: -0.5 },
   title: { fontSize: 24, fontWeight: "700", textAlign: "center" },
   subtitle: { fontSize: 14, textAlign: "center", marginTop: spacing.xs, marginBottom: spacing.xl, lineHeight: 20 },
   devHint: {

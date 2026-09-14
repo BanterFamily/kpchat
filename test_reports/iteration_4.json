@@ -1,0 +1,40 @@
+{
+  "summary": "KPChat rebrand feature adds (CountryPicker + AppLogo + auto-OTP hints) tested end-to-end on Expo web preview at 390x844. ALL primary acceptance criteria PASS. Login screen: KPChat PNG logo renders (img[src*=kpchat-logo] count=1) — no Ionicons chat bubble; login-country-picker shows '🇮🇩 +62' by default; login-phone-input placeholder is exactly '812-3456-7890' (no + prefix). Country picker bottom sheet opens with searchable country-search-input; typing 'India' filters to 1 row (country-row-IN); selecting it closes the sheet and updates the button to '🇮🇳 +91'. Register screen mirrors the login picker (register-country-picker), correctly updates dial prefix; full register flow (name 'TEST_India' + India +91 + local digits 9XXXXXXXX + register-submit-button) navigates to Verify. Verify screen: KPChat PNG logo present (3 img instances incl. AppLogo header — no shield icon), dev-code-hint displays 'Mode Demo' + 6-digit code, verify-code-input has autoComplete='sms-otp' + inputmode='numeric' + maxlength=6 + autoFocus, autofill-code button copies dev_code into the input, verify-submit-button lands on chats-screen. E2E: Register with picker->India + local -> body shows full E.164 '+91989377508' on Verify screen; TokenOut round-trip works (chats-screen renders). Splash: /app/frontend/app/index.tsx uses expo-image with require('../assets/images/kpchat-logo.png') + ActivityIndicator — logo asset exists at /app/frontend/assets/images/kpchat-logo.png (209KB). MINOR GAP: The review spec asks the underlying web <input> to have autocomplete='one-time-code'. React Native's autoComplete='sms-otp' is passed through to react-native-web as-is (DOM shows autocomplete='sms-otp'), which is the correct Android RN value but NOT the browser/iOS Safari web standard 'one-time-code'. textContentType='oneTimeCode' is set (correct for iOS native), and importantForAutofill='yes' is set (correct for Android native), so the native app is fully correct — but the web-only DOM assertion fails. Deprecated packages check: none (no expo-av / expo-barcode-scanner / expo-background-fetch). Non-blocking pre-existing warnings: 'shadow* style deprecated → boxShadow' and 'props.pointerEvents deprecated' (already flagged in iter1/2/3, unrelated to this feature).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "global", "issues": ["Pre-existing RN-Web console warnings ('shadow* → boxShadow', 'props.pointerEvents → style.pointerEvents') — unrelated to this feature, already flagged."]}
+    ],
+    "react_native_issues": [
+      {"component": "verify-code-input (verify.tsx:96-109)", "issue": "autoComplete='sms-otp' passes through to react-native-web as autocomplete='sms-otp' in the DOM. The review spec requires autocomplete='one-time-code' on web. Recommend Platform.select({ web: 'one-time-code', android: 'sms-otp', ios: 'one-time-code', default: 'sms-otp' }) so browsers (and iOS Safari) get the WHATWG-standard token while Android RN keeps its native token. textContentType='oneTimeCode' + importantForAutofill='yes' are set correctly for native. Reference: /app/frontend/app/(auth)/verify.tsx:105."}
+    ]
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_4.json",
+    "Prior: /app/test_reports/iteration_3.json (backend 14/14 pass — no re-run since backend unchanged this iter)",
+    "/app/backend/tests/test_kpchat_phone_otp.py"
+  ],
+  "action_items": [
+    "Only cosmetic gap vs. spec: change autoComplete on verify-code-input to Platform.select({ web: 'one-time-code', ios: 'one-time-code', android: 'sms-otp', default: 'sms-otp' }) so the web preview DOM asserts autocomplete='one-time-code' and iOS Safari gets the correct autofill hint. Native (iOS/Android) already works via textContentType/importantForAutofill.",
+    "(Optional pre-existing) Silence 'shadow* deprecated' RN-Web warnings by migrating to style.boxShadow."
+  ],
+  "critical_code_review_comments": [
+    "CountryPicker uses @gorhom/bottom-sheet with BottomSheetFlatList + backdropComponent + snapPoints=['85%'] + enablePanDownToClose — good UX. index=-1 default (closed) with forwardRef+useImperativeHandle(open/close) is clean.",
+    "COUNTRIES list = 57 curated entries with unique keyExtractor 'code+dial' (safe since Canada +1 and US +1 share dial). DEFAULT_COUNTRY = Indonesia (+62) per spec.",
+    "fullPhone concatenation in login.tsx:26 and register.tsx:27 uses country.dial + localPhone.replace(/^0+/,'').replace(/\\D/g,'') — correctly strips leading zeros AND non-digits BEFORE prefixing dial. Confirmed via body 'text +91989377508' on Verify.",
+    "AppLogo (src/components/AppLogo.tsx) is a thin wrapper around expo-image with borderRadius = size*0.22 and overflow:hidden — clean, reusable, size-prop parameterized (login=104, register=92, verify=80, splash=140).",
+    "app/index.tsx splash uses expo-image directly (not AppLogo wrapper) with a slightly larger logo and centered ActivityIndicator — acceptable inconsistency; could reuse <AppLogo size={140}/> for DRY.",
+    "verify.tsx keeps textContentType='oneTimeCode' + importantForAutofill='yes' — iOS and Android native autofill will work. Only web DOM autocomplete token differs (see action_items).",
+    "Both login and register mount <CountryPicker/> at the KeyboardAvoidingView root — during Expo Router transitions BOTH auth screens may briefly be in the DOM, resulting in 2x country-search-input elements. NOT a user-facing bug (only the active screen's picker is opened), but tests must scope to :visible.",
+    "server.py unchanged this iter (779 lines — still exceeds 700-line guideline, flagged in iter3)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (frontend-only test scope; backend unchanged since iter3 = 14/14)", "frontend": "100% on primary flows (logo, default +62, picker search, India +91 select, register->verify->chats, dev-code-hint, autofill, splash). Minor spec-vs-native mismatch on web autocomplete token flagged (does not block native release)."},
+  "seed_data_creation": "Created 2 fresh users via OTP flow with unique time-based phone numbers under +91 (e.g. +91989377508 named 'TEST_India'). No cleanup — each run uses a fresh phone.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "This iter is frontend-only (backend unchanged, iter3 backend suite still valid). New testIDs added: login-country-picker, register-country-picker, country-search-input, country-row-<ISO2> (e.g. country-row-IN, country-row-US, country-row-SG), splash-screen. AppLogo component wraps assets/images/kpchat-logo.png — verify by 'img[src*=kpchat-logo]'. When testing register flow, use page.locator('[data-testid=country-search-input]:visible').first because BOTH login and register mount their own CountryPicker sibling — DOM contains 2 hidden search inputs during transitions. Autofill test: click autofill-code Pressable inside dev-code-hint; verifies dev_code copied into verify-code-input. Full E.164 assertion: after picking country X + typing local digits, the Verify screen subtitle renders params.phone which is server-normalized country.dial + local (leading zeros stripped).",
+  "rca_of_issue": "N/A — no functional bugs. Only spec deviation is verify-code-input DOM autocomplete='sms-otp' vs. requested 'one-time-code' on web. Root cause: React Native autoComplete='sms-otp' is passed through to react-native-web verbatim; the WHATWG-standard token for browser OTP autofill is 'one-time-code' (Safari 12+). Mitigation: Platform.select on autoComplete in verify.tsx:105."
+}

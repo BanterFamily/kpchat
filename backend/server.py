@@ -180,6 +180,19 @@ class SendMessageIn(BaseModel):
     text: Optional[str] = None
     media_path: Optional[str] = None
     media_type: Optional[Literal["image", "video", "audio", "file"]] = None
+    audio_duration_ms: Optional[int] = None
+    reply_to_id: Optional[str] = None
+
+
+class ReplyPreview(BaseModel):
+    id: str
+    sender_id: str
+    text: Optional[str] = None
+    media_type: Optional[str] = None
+
+
+class ReactIn(BaseModel):
+    emoji: str
 
 
 class MessageOut(BaseModel):
@@ -189,8 +202,11 @@ class MessageOut(BaseModel):
     text: Optional[str]
     media_path: Optional[str]
     media_type: Optional[str]
+    audio_duration_ms: Optional[int] = None
     created_at: str
     read_by: List[str]
+    reply_to: Optional[ReplyPreview] = None
+    reactions: Dict[str, List[str]] = Field(default_factory=dict)
 
 
 # ----------------------------- HELPERS ----------------------------- #
@@ -412,6 +428,23 @@ async def get_chat(chat_id: str, user=Depends(get_current_user)):
 
 
 # ----------------------------- MESSAGES ----------------------------- #
+def _msg_to_out(m: dict) -> MessageOut:
+    reply = m.get("reply_to")
+    return MessageOut(
+        id=m["id"],
+        chat_id=m["chat_id"],
+        sender_id=m["sender_id"],
+        text=m.get("text"),
+        media_path=m.get("media_path"),
+        media_type=m.get("media_type"),
+        audio_duration_ms=m.get("audio_duration_ms"),
+        created_at=_iso(m["created_at"]),
+        read_by=m.get("read_by", []),
+        reply_to=ReplyPreview(**reply) if reply else None,
+        reactions=m.get("reactions", {}),
+    )
+
+
 @api.get("/chats/{chat_id}/messages", response_model=List[MessageOut])
 async def list_messages(chat_id: str, user=Depends(get_current_user)):
     chat = await db.chats.find_one({"id": chat_id})
@@ -425,23 +458,21 @@ async def list_messages(chat_id: str, user=Depends(get_current_user)):
         {"chat_id": chat_id, "sender_id": {"$ne": user["id"]}, "read_by": {"$ne": user["id"]}},
         {"$addToSet": {"read_by": user["id"]}},
     )
-    return [
-        MessageOut(
-            id=m["id"],
-            chat_id=m["chat_id"],
-            sender_id=m["sender_id"],
-            text=m.get("text"),
-            media_path=m.get("media_path"),
-            media_type=m.get("media_type"),
-            created_at=_iso(m["created_at"]),
-            read_by=m.get("read_by", []),
-        )
-        for m in msgs
-    ]
+    return [_msg_to_out(m) for m in msgs]
 
 
 async def _persist_message(chat: dict, sender_id: str, body: SendMessageIn) -> dict:
     now = datetime.now(timezone.utc)
+    reply_preview = None
+    if body.reply_to_id:
+        parent = await db.messages.find_one({"id": body.reply_to_id, "chat_id": chat["id"]}, {"_id": 0})
+        if parent:
+            reply_preview = {
+                "id": parent["id"],
+                "sender_id": parent["sender_id"],
+                "text": parent.get("text"),
+                "media_type": parent.get("media_type"),
+            }
     msg_doc = {
         "id": str(uuid.uuid4()),
         "chat_id": chat["id"],
@@ -449,8 +480,11 @@ async def _persist_message(chat: dict, sender_id: str, body: SendMessageIn) -> d
         "text": body.text,
         "media_path": body.media_path,
         "media_type": body.media_type,
+        "audio_duration_ms": body.audio_duration_ms,
         "created_at": now,
         "read_by": [sender_id],
+        "reply_to": reply_preview,
+        "reactions": {},
     }
     await db.messages.insert_one(msg_doc)
     await db.chats.update_one({"id": chat["id"]}, {"$set": {"updated_at": now}})
@@ -465,18 +499,38 @@ async def send_message(body: SendMessageIn, user=Depends(get_current_user)):
     if not body.text and not body.media_path:
         raise HTTPException(status_code=400, detail="Empty message")
     msg = await _persist_message(chat, user["id"], body)
-    out = MessageOut(
-        id=msg["id"],
-        chat_id=msg["chat_id"],
-        sender_id=msg["sender_id"],
-        text=msg.get("text"),
-        media_path=msg.get("media_path"),
-        media_type=msg.get("media_type"),
-        created_at=_iso(msg["created_at"]),
-        read_by=msg["read_by"],
-    )
-    # broadcast via websocket
+    out = _msg_to_out(msg)
     await manager.broadcast_chat(chat, out.dict())
+    return out
+
+
+@api.post("/messages/{message_id}/react", response_model=MessageOut)
+async def react_to_message(message_id: str, body: ReactIn, user=Depends(get_current_user)):
+    msg = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    chat = await db.chats.find_one({"id": msg["chat_id"]})
+    if not chat or user["id"] not in chat["member_ids"]:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    reactions: dict = dict(msg.get("reactions", {}) or {})
+    emoji = body.emoji.strip()
+    # Was the user already reacting with this exact emoji?
+    already_same = emoji in reactions and user["id"] in reactions[emoji]
+    # Remove any previous reactions by this user (single reaction per user).
+    for e in list(reactions.keys()):
+        if user["id"] in reactions[e]:
+            reactions[e] = [u for u in reactions[e] if u != user["id"]]
+            if not reactions[e]:
+                del reactions[e]
+    # If it was the same emoji, we've toggled off. Otherwise add the new one.
+    if emoji and not already_same:
+        reactions.setdefault(emoji, [])
+        if user["id"] not in reactions[emoji]:
+            reactions[emoji].append(user["id"])
+    await db.messages.update_one({"id": message_id}, {"$set": {"reactions": reactions}})
+    updated = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    out = _msg_to_out(updated)
+    await manager.broadcast_chat(chat, {**out.dict(), "_event": "reaction"})
     return out
 
 

@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 2 tested new Voice Notes + Reply + Reactions features on WhatsApp-clone. Backend: 5/5 pytest cases pass (test_reactions_reply_audio.py) — POST /api/messages with reply_to_id embeds ReplyPreview {id,sender_id,text,media_type}; POST /api/messages/{id}/react adds/toggles-off/switches emoji with single-reaction-per-user semantics; MessageOut shape returned includes reactions dict; 404 for missing message id; audio upload (audio/m4a) works and GET /api/files/{path}?token=JWT returns the original bytes; audio_duration_ms round-trips in send/list. Frontend (Expo web, mobile 390x844, alice@test.com): logged in, opened direct chat with Bob. Verified: (1) voice-record-button visible when input empty, switches to send-message-button when text present, switches back after sending — VERIFIED. (2) Long-press (mouse.down+400-700ms+up) opens BottomSheet with reactions-row and action-reply testIDs — VERIFIED. (3) react-emoji-❤️ tap triggers POST /api/messages/{id}/react and reaction chips (reaction-{id}-{emoji}) render on target bubbles — VERIFIED end-to-end (existing 👍/😂/❤️ chips visible on multiple bubbles including a fresh one seeded during test). (4) action-reply → reply-preview bar → send attaches reply_to_id and quoted parent is rendered inside sent bubble — VERIFIED via UI screenshot showing 'TEST_reply_yo' bubble quoting 'TEST_parent_hello'. (5) Audio message injected via backend renders AudioMessage waveform with audio-message-{id} and audio-toggle-{id} testIDs (1 rendered). Deprecated packages: NONE found (expo-audio is the modern replacement for expo-av; expo-camera used; no expo-background-fetch/expo-barcode-scanner in code). Note: React Native Web microphone recording via Playwright was correctly SKIPPED per instructions. Minor testing artefact: on 2nd Playwright run the mouse-computed bubble coordinates hit an older bubble because the sheet overlays the bottom of the FlatList (scroll shifts newest bubble off-screen after sheet opens) — this is a TEST harness limitation, not an app bug (the successful earlier run + reaction chips visible on the freshly-sent messages in screenshots confirm the flow).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "global", "issues": ["Console warning still present: '\"shadow*\" style props are deprecated. Use \"boxShadow\"' (already reported in iter1; non-blocking)."]},
+      {"screen": "chat-detail", "issues": ["Console warning: 'props.pointerEvents is deprecated. Use style.pointerEvents' — coming from @gorhom/bottom-sheet or expo internals; non-blocking."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_reactions_reply_audio.py",
+    "/app/test_reports/pytest/iter2_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Consider auto-scrolling FlatList to the bubble when opening MessageActionsSheet, so the target message remains visible above the 36% sheet — improves UX when reacting to the newest message.",
+    "(Optional, cosmetic) Silence RN-Web deprecation warnings: replace shadow* with boxShadow; use style.pointerEvents."
+  ],
+  "critical_code_review_comments": [
+    "server.py _persist_message correctly stores reply_to preview {id,sender_id,text,media_type}; _msg_to_out casts to ReplyPreview model — clean.",
+    "react_to_message enforces single-reaction-per-user by removing prior emojis for the user before adding; toggle-off logic uses `already_same` flag — correct behaviour verified.",
+    "Reaction broadcast payload includes `_event: 'reaction'` so client de-dupes and does not append a duplicate message — good.",
+    "SendMessageIn now allows audio_duration_ms + reply_to_id; validation preserved (400 when text and media_path both missing).",
+    "AudioMessage.tsx uses expo-audio (useAudioPlayer/useAudioPlayerStatus) — no deprecated expo-av; good.",
+    "Chat detail send button reuses same Pressable with dynamic testID (voice-record-button/send-message-button) — matches spec.",
+    "server.py has grown to 685 lines — still under 700 threshold but keep an eye on modularisation."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_reactions_reply_audio.py (created)"
+  ],
+  "success_rate": {"backend": "100% (5/5 new; iter1 15/15 still valid)", "frontend": "100% on all testable flows (voice recording UI-only skipped per spec)"},
+  "seed_data_creation": "Created TEST_* text messages and one audio message (uploaded via /api/upload with fake m4a bytes) in the alice↔bob direct chat during tests. No cleanup performed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "TestIDs for new features: bubble-{id}, reactions-row, react-emoji-{emoji} (emoji is literal unicode ❤️👍😂😮😢🙏), action-reply, reaction-{id}-{emoji}, reply-preview, cancel-reply, audio-message-{id}, audio-toggle-{id}, voice-record-button/send-message-button (mutually exclusive based on text input). For Playwright long-press: page.mouse.move(cx,cy); mouse.down(); wait 500-700ms; mouse.up(). Note: after sheet opens (36% height), newest FlatList row may be under the sheet — if testing reactions on the freshest bubble, scroll target into view first OR compute bounding_box AFTER a small settle wait. Backend tests: `set -a && source /app/frontend/.env && set +a && pytest /app/backend/tests/test_reactions_reply_audio.py -v`.",
+  "rca_of_issue": "N/A — no bugs found. All new features (voice-note button UI, reply-quote round-trip, emoji reactions with toggle/switch semantics, audio message rendering) work end-to-end across backend and frontend."
+}

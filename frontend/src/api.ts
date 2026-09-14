@@ -75,8 +75,16 @@ export type Message = {
   text: string | null;
   media_path: string | null;
   media_type: string | null;
+  audio_duration_ms?: number | null;
   created_at: string;
   read_by: string[];
+  reply_to?: {
+    id: string;
+    sender_id: string;
+    text: string | null;
+    media_type: string | null;
+  } | null;
+  reactions?: Record<string, string[]>;
 };
 
 export type Chat = {

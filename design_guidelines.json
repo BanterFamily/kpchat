@@ -1,0 +1,246 @@
+{
+  "app_name": "WhatsApp Clone",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A highly readable, fluid, and focused messaging experience where conversations are the hero.",
+  "color": {
+    "light": {
+      "surface": "#FFFFFF",
+      "onSurface": "#000000",
+      "surfaceSecondary": "#F2F2F7",
+      "onSurfaceSecondary": "#3A3A3C",
+      "surfaceTertiary": "#E5E5EA",
+      "onSurfaceTertiary": "#1C1C1E",
+      "surfaceInverse": "#1C1C1E",
+      "onSurfaceInverse": "#FFFFFF",
+      "brand": "#25D366",
+      "onBrand": "#FFFFFF",
+      "brandPrimary": "#25D366",
+      "onBrandPrimary": "#FFFFFF",
+      "brandSecondary": "#075E54",
+      "onBrandSecondary": "#FFFFFF",
+      "brandTertiary": "#E2F7CB",
+      "onBrandTertiary": "#000000",
+      "success": "#34C759",
+      "onSuccess": "#FFFFFF",
+      "warning": "#FF9500",
+      "onWarning": "#FFFFFF",
+      "error": "#FF3B30",
+      "onError": "#FFFFFF",
+      "info": "#007AFF",
+      "onInfo": "#FFFFFF",
+      "border": "#C6C6C8",
+      "borderStrong": "#8E8E93",
+      "divider": "#E5E5EA",
+      "muted": "#8E8E93"
+    },
+    "dark": {
+      "surface": "#000000",
+      "onSurface": "#FFFFFF",
+      "surfaceSecondary": "#1C1C1E",
+      "onSurfaceSecondary": "#EBEBF5",
+      "surfaceTertiary": "#2C2C2E",
+      "onSurfaceTertiary": "#FFFFFF",
+      "surfaceInverse": "#FFFFFF",
+      "onSurfaceInverse": "#000000",
+      "brand": "#25D366",
+      "onBrand": "#000000",
+      "brandPrimary": "#25D366",
+      "onBrandPrimary": "#000000",
+      "brandSecondary": "#075E54",
+      "onBrandSecondary": "#FFFFFF",
+      "brandTertiary": "#054640",
+      "onBrandTertiary": "#FFFFFF",
+      "success": "#32D74B",
+      "onSuccess": "#000000",
+      "warning": "#FF9F0A",
+      "onWarning": "#000000",
+      "error": "#FF453A",
+      "onError": "#FFFFFF",
+      "info": "#0A84FF",
+      "onInfo": "#FFFFFF",
+      "border": "#38383A",
+      "borderStrong": "#636366",
+      "divider": "#38383A",
+      "muted": "#8E8E93"
+    }
+  },
+  "typography": {
+    "displayFontFamily": "Geist",
+    "textFontFamily": "Geist",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Use iOS-native rhythmic spacing. Content inside rows has generous padding but lists stretch edge-to-edge. Touch targets strictly >=44pt.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": 1,
+  "navigation": "bottom_tabs",
+  "icon_set": "Ionicons",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Use over the bottom tab bar so the chat list softly blurs behind it.",
+      "Use over sticky headers (like the Chat list header and Chat detail navigation bar) to blur scrolling messages.",
+      "Use for contextual Action Sheets / dropdown menus."
+    ],
+    "dont's": [
+      "Do not use on chat bubbles.",
+      "Do not use on text inputs.",
+      "Do not use on simple list rows."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Splash / Onboarding",
+      "purpose": "Introduce the WhatsApp-like green branding and handle the first-time setup or Login/Register routing.",
+      "layout": "Full-bleed surface container. Central green logo/icon (Ionicons logo-whatsapp or custom SVG). Primary CTA anchored at bottom (flex-end) with safe area clearance. Simple terms and conditions text above CTA.",
+      "states": {
+        "loading": "Spinner over surface.",
+        "empty": "N/A",
+        "error": "N/A"
+      }
+    },
+    {
+      "name": "Auth (Login & Register)",
+      "purpose": "Email and password based authentication.",
+      "layout": "Single column layout wrapped in KeyboardAvoidingView. Minimal header. Email and Password inputs using surfaceSecondary background with pill/lg radius. Primary CTA anchored below the form. Navigation to toggle between Login/Register.",
+      "states": {
+        "loading": "Button shows activity indicator and disabled state.",
+        "empty": "Form layout ready.",
+        "error": "Inline red text below the errored input field."
+      }
+    },
+    {
+      "name": "Chats List",
+      "purpose": "Display all ongoing 1-on-1 and group conversations.",
+      "layout": "Header with 'Edit' and 'New Chat' icons. Large Title 'Chats' that collapses into inline header on scroll. Search bar directly below the large title. List of rows: Left avatar (circle), middle column (Name/Group title, Last message text), right column (timestamp, unread badge, right chevron). Divider lines between rows, but starting from the text column (inset), not full bleed.",
+      "states": {
+        "loading": "Skeleton rows (circle + two text rectangles).",
+        "empty": "Illustration/Icon with 'No chats yet' and a CTA to start a new chat.",
+        "error": "Full screen error with retry button."
+      }
+    },
+    {
+      "name": "Chat Detail",
+      "purpose": "The core messaging experience showing message history and text input.",
+      "layout": "Header: Back button, Avatar, Contact Name, Online/Typing status, Video/Call action icons. Glass header. Background uses the subtle light/dark texture image with 'expo-image' set behind all content. Messages area: scrollable list. Bubbles use `brandTertiary` for sent (right aligned, tail on right) and `surface` for received (left aligned, tail on left). Bottom input area: Glass background, plus icon, pill-shaped text input (surfaceSecondary), camera icon, mic/send icon.",
+      "states": {
+        "loading": "Centered spinner on texture background.",
+        "empty": "Empty background with centered encrypted lock message.",
+        "error": "Toast or header banner indicating 'Connecting...'."
+      }
+    },
+    {
+      "name": "Contacts List (New Chat)",
+      "purpose": "Select a friend to start a new 1-on-1 chat or create a group.",
+      "layout": "Modal sheet or full screen stack with header 'New Chat'. Search bar at top. Top actions like 'New Group', 'New Contact'. Alphabetical list of contacts showing avatar, name, and 'about' status.",
+      "states": {
+        "loading": "Skeleton rows.",
+        "empty": "Message 'No contacts found'.",
+        "error": "Permissions error or retry button."
+      }
+    },
+    {
+      "name": "Groups List & Detail",
+      "purpose": "Manage and participate in group chats.",
+      "layout": "Group list follows Chat List pattern. Group Detail follows Chat Detail pattern but adds sender names above received message bubbles in different colors.",
+      "states": {
+        "loading": "Skeleton bubbles.",
+        "empty": "Start of conversation.",
+        "error": "Error banner."
+      }
+    },
+    {
+      "name": "Status / Updates",
+      "purpose": "Display ephemeral statuses (WhatsApp Status feature).",
+      "layout": "List view. Top section 'My Status' to add a status. Followed by 'Recent updates' section header. Horizontal scroll or vertical list of contacts with gradient ring around their avatar indicating unseen status.",
+      "states": {
+        "loading": "Skeleton rows.",
+        "empty": "No recent updates.",
+        "error": "Retry to load updates."
+      }
+    },
+    {
+      "name": "Settings / Profile",
+      "purpose": "Manage user account, profile picture, status, and app settings.",
+      "layout": "Grouped list style (iOS style Settings). Top card: User avatar, Name, Status, QR code button. Followed by categorized list groups (Account, Privacy, Chats, Notifications) in surfaceSecondary cards over surface background.",
+      "states": {
+        "loading": "Skeleton layout.",
+        "empty": "N/A",
+        "error": "Retry loading profile data."
+      }
+    }
+  ],
+  "images": {
+    "chat_background": {
+      "url": "https://images.unsplash.com/photo-1604147706283-d7119b5b822c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1NzZ8MHwxfHNlYXJjaHwxfHxzdWJ0bGUlMjBsaWdodCUyMHRleHR1cmUlMjBiYWNrZ3JvdW5kJTIwcGF0dGVybnxlbnwwfHx8fDE3ODkzNjU5NzN8MA&ixlib=rb-4.1.0&q=85",
+      "dark": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1ODB8MHwxfHNlYXJjaHwxfHxkYXJrJTIwc3VidGxlJTIwdGV4dHVyZSUyMGJhY2tncm91bmQlMjBwYXR0ZXJufGVufDB8fHx8MTc4OTM2NTk4Mnww&ixlib=rb-4.1.0&q=85",
+      "alt": "Textured chat background"
+    },
+    "avatar_1": {
+      "url": "https://images.unsplash.com/photo-1562337404-3044c84ac061?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHwxfHxwb3J0cmFpdCUyMHNtaWxpbmclMjBmYWNlfGVufDB8fHx8MTc4OTM2NTk3M3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Contact Avatar"
+    },
+    "avatar_2": {
+      "url": "https://images.unsplash.com/photo-1567516364473-233c4b6fcfbe?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHw0fHxwb3J0cmFpdCUyMHNtaWxpbmclMjBmYWNlfGVufDB8fHx8MTc4OTM2NTk3M3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Contact Avatar"
+    },
+    "avatar_3": {
+      "url": "https://images.unsplash.com/photo-1623717217554-72ca676de535?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzV8MHwxfHNlYXJjaHwzfHxwb3J0cmFpdCUyMHNtaWxpbmclMjBmYWNlfGVufDB8fHx8MTc4OTM2NTk3M3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Contact Avatar"
+    },
+    "group_avatar": {
+      "url": "https://images.unsplash.com/photo-1517486808906-6ca8b3f04846?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1ODB8MHwxfHNlYXJjaHwxfHxncm91cCUyMG9mJTIwZnJpZW5kcyUyMHNtaWxpbmd8ZW58MHx8fHwxNzg5MzY1OTgyfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Group Avatar"
+    }
+  },
+  "haptics": {
+    "events": {
+      "message_send": "impactLight",
+      "tab_press": "selection",
+      "long_press_message": "impactMedium",
+      "toggle_switch": "selection",
+      "pull_to_refresh": "impactLight"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Follow the defined iOS-Native Clean (1) personality. Do not inject Material styling elements on iOS layouts.",
+    "Implement the Chat Detail screen with the exact `brandTertiary` colors defined for sent message bubbles (E2F7CB in light mode, 054640 in dark mode).",
+    "Make sure the chat detail background uses the textured background image URLs provided in the images map, and configure it using `expo-image` properly beneath the chat scrollview.",
+    "Do not use generic text avatars where images are available. Use the provided avatar_1, avatar_2, and group_avatar for mock data.",
+    "Apply `expo-glass-effect`/`expo-blur` to the chat detail bottom input container, top navigation header, and bottom tabs so messages elegantly blur behind them as the user scrolls.",
+    "Ensure safe area margins are strictly followed so that input bars do not fall under the iOS home indicator.",
+    "Add 'flex: 1' empty/loading/error states for all screens. For the Chats list, render an empty state with a centered illustration and 'Start a new chat' CTA if the list is empty.",
+    "Respect the 'NDIGO / VIOLET / PURPLE / ALL BLUES NUCLEAR BAN'. Only the Whatsapp green `#25D366` and dark teal `#075E54` should be used as accent colors."
+  ]
+}

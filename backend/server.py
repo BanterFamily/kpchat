@@ -1,0 +1,630 @@
+"""WhatsApp Clone Backend - FastAPI + MongoDB + WebSocket."""
+
+import asyncio
+import logging
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Dict, List, Literal, Optional, Set
+
+import bcrypt
+import jwt
+import requests
+from dotenv import load_dotenv
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, EmailStr, Field
+from starlette.middleware.cors import CORSMiddleware
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / ".env")
+
+# ----------------------------- CONFIG ----------------------------- #
+MONGO_URL = os.environ["MONGO_URL"]
+DB_NAME = os.environ["DB_NAME"]
+JWT_SECRET = os.environ["JWT_SECRET"]
+JWT_ALGORITHM = "HS256"
+JWT_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "43200"))
+
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+APP_NAME = "whatsapp-clone"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("wa_clone")
+
+# ----------------------------- DB ----------------------------- #
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
+
+# ----------------------------- STORAGE ----------------------------- #
+_storage_key: Optional[str] = None
+
+
+def _init_storage_sync() -> str:
+    global _storage_key
+    if _storage_key:
+        return _storage_key
+    resp = requests.post(
+        f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30
+    )
+    resp.raise_for_status()
+    _storage_key = resp.json()["storage_key"]
+    return _storage_key
+
+
+def _put_object_sync(path: str, data: bytes, content_type: str) -> dict:
+    key = _init_storage_sync()
+    resp = requests.put(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key, "Content-Type": content_type},
+        data=data,
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _get_object_sync(path: str):
+    global _storage_key
+    key = _init_storage_sync()
+    resp = requests.get(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key},
+        timeout=60,
+    )
+    if resp.status_code == 503:
+        _storage_key = None
+        key = _init_storage_sync()
+        resp = requests.get(
+            f"{STORAGE_URL}/objects/{path}",
+            headers={"X-Storage-Key": key},
+            timeout=60,
+        )
+    resp.raise_for_status()
+    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+
+
+# ----------------------------- APP ----------------------------- #
+app = FastAPI(title="WhatsApp Clone API")
+api = APIRouter(prefix="/api")
+
+
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.messages.create_index([("chat_id", 1), ("created_at", 1)])
+    await db.chats.create_index("member_ids")
+    try:
+        if EMERGENT_KEY:
+            await run_in_threadpool(_init_storage_sync)
+            logger.info("Object storage initialised")
+    except Exception as exc:  # noqa
+        logger.warning("Storage init failed: %s", exc)
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    client.close()
+
+
+# ----------------------------- MODELS ----------------------------- #
+class RegisterIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6, max_length=72)
+    name: str = Field(min_length=1, max_length=60)
+
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=72)
+
+
+class UserOut(BaseModel):
+    id: str
+    email: EmailStr
+    name: str
+    about: str
+    avatar_path: Optional[str] = None
+    online: bool = False
+    last_seen: Optional[str] = None
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+class UpdateProfileIn(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    about: Optional[str] = Field(default=None, max_length=160)
+    avatar_path: Optional[str] = None
+
+
+class CreateChatIn(BaseModel):
+    kind: Literal["direct", "group"] = "direct"
+    member_ids: List[str]
+    name: Optional[str] = None  # for group chats
+
+
+class ChatOut(BaseModel):
+    id: str
+    kind: str
+    name: Optional[str]
+    avatar_path: Optional[str] = None
+    member_ids: List[str]
+    members: List[UserOut]
+    last_message: Optional[dict] = None
+    unread_count: int = 0
+    updated_at: str
+
+
+class SendMessageIn(BaseModel):
+    chat_id: str
+    text: Optional[str] = None
+    media_path: Optional[str] = None
+    media_type: Optional[Literal["image", "video", "audio", "file"]] = None
+
+
+class MessageOut(BaseModel):
+    id: str
+    chat_id: str
+    sender_id: str
+    text: Optional[str]
+    media_path: Optional[str]
+    media_type: Optional[str]
+    created_at: str
+    read_by: List[str]
+
+
+# ----------------------------- HELPERS ----------------------------- #
+def hash_password(p: str) -> str:
+    return bcrypt.hashpw(p.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(p: str, h: str) -> bool:
+    try:
+        return bcrypt.checkpw(p.encode("utf-8"), h.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def create_token(user_id: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {"sub": user_id, "iat": now, "exp": now + timedelta(minutes=JWT_MINUTES)}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def user_to_out(u: dict) -> UserOut:
+    return UserOut(
+        id=u["id"],
+        email=u["email"],
+        name=u["name"],
+        about=u.get("about", "Hey there! I am using WA-Clone."),
+        avatar_path=u.get("avatar_path"),
+        online=bool(u.get("online", False)),
+        last_seen=_iso(u.get("last_seen")),
+    )
+
+
+async def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+def _decode_token_or_none(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get("sub")
+    except jwt.PyJWTError:
+        return None
+
+
+# ----------------------------- AUTH ROUTES ----------------------------- #
+@api.get("/")
+async def root():
+    return {"status": "ok", "app": "whatsapp-clone"}
+
+
+@api.post("/auth/register", response_model=TokenOut)
+async def register(body: RegisterIn):
+    email = body.email.lower().strip()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    user_id = str(uuid.uuid4())
+    doc = {
+        "id": user_id,
+        "email": email,
+        "name": body.name.strip(),
+        "password_hash": hash_password(body.password),
+        "about": "Hey there! I am using WA-Clone.",
+        "avatar_path": None,
+        "online": False,
+        "last_seen": datetime.now(timezone.utc),
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.users.insert_one(doc)
+    token = create_token(user_id)
+    return TokenOut(access_token=token, user=user_to_out(doc))
+
+
+@api.post("/auth/login", response_model=TokenOut)
+async def login(body: LoginIn):
+    email = body.email.lower().strip()
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_token(user["id"])
+    return TokenOut(access_token=token, user=user_to_out(user))
+
+
+@api.get("/auth/me", response_model=UserOut)
+async def me(user=Depends(get_current_user)):
+    return user_to_out(user)
+
+
+@api.patch("/auth/me", response_model=UserOut)
+async def update_me(body: UpdateProfileIn, user=Depends(get_current_user)):
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if updates:
+        await db.users.update_one({"id": user["id"]}, {"$set": updates})
+    updated = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return user_to_out(updated)
+
+
+# ----------------------------- USERS ----------------------------- #
+@api.get("/users", response_model=List[UserOut])
+async def list_users(user=Depends(get_current_user)):
+    docs = await db.users.find({"id": {"$ne": user["id"]}}, {"_id": 0}).to_list(1000)
+    return [user_to_out(d) for d in docs]
+
+
+@api.get("/users/{user_id}", response_model=UserOut)
+async def get_user(user_id: str, _=Depends(get_current_user)):
+    u = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not u:
+        raise HTTPException(status_code=404, detail="Not found")
+    return user_to_out(u)
+
+
+# ----------------------------- CHATS ----------------------------- #
+async def _build_chat_out(chat: dict, viewer_id: str) -> ChatOut:
+    members_docs = await db.users.find(
+        {"id": {"$in": chat["member_ids"]}}, {"_id": 0}
+    ).to_list(100)
+    members = [user_to_out(m) for m in members_docs]
+    last = await db.messages.find_one(
+        {"chat_id": chat["id"]}, {"_id": 0}, sort=[("created_at", -1)]
+    )
+    last_msg = None
+    if last:
+        last_msg = {
+            "id": last["id"],
+            "text": last.get("text"),
+            "media_type": last.get("media_type"),
+            "sender_id": last["sender_id"],
+            "created_at": _iso(last["created_at"]),
+        }
+    unread = await db.messages.count_documents(
+        {
+            "chat_id": chat["id"],
+            "sender_id": {"$ne": viewer_id},
+            "read_by": {"$ne": viewer_id},
+        }
+    )
+    return ChatOut(
+        id=chat["id"],
+        kind=chat["kind"],
+        name=chat.get("name"),
+        avatar_path=chat.get("avatar_path"),
+        member_ids=chat["member_ids"],
+        members=members,
+        last_message=last_msg,
+        unread_count=unread,
+        updated_at=_iso(chat.get("updated_at", chat.get("created_at"))),
+    )
+
+
+@api.get("/chats", response_model=List[ChatOut])
+async def list_chats(user=Depends(get_current_user)):
+    chats = await db.chats.find(
+        {"member_ids": user["id"]}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(200)
+    return [await _build_chat_out(c, user["id"]) for c in chats]
+
+
+@api.post("/chats", response_model=ChatOut)
+async def create_chat(body: CreateChatIn, user=Depends(get_current_user)):
+    member_ids = list({user["id"], *body.member_ids})
+    if body.kind == "direct":
+        if len(member_ids) != 2:
+            raise HTTPException(status_code=400, detail="Direct chat needs 2 members")
+        existing = await db.chats.find_one(
+            {"kind": "direct", "member_ids": {"$all": member_ids, "$size": 2}},
+            {"_id": 0},
+        )
+        if existing:
+            return await _build_chat_out(existing, user["id"])
+    else:
+        if len(member_ids) < 2:
+            raise HTTPException(status_code=400, detail="Group needs 2+ members")
+        if not body.name:
+            raise HTTPException(status_code=400, detail="Group name required")
+
+    now = datetime.now(timezone.utc)
+    chat_doc = {
+        "id": str(uuid.uuid4()),
+        "kind": body.kind,
+        "name": body.name,
+        "avatar_path": None,
+        "member_ids": member_ids,
+        "created_by": user["id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.chats.insert_one(chat_doc)
+    return await _build_chat_out(chat_doc, user["id"])
+
+
+@api.get("/chats/{chat_id}", response_model=ChatOut)
+async def get_chat(chat_id: str, user=Depends(get_current_user)):
+    chat = await db.chats.find_one({"id": chat_id}, {"_id": 0})
+    if not chat or user["id"] not in chat["member_ids"]:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return await _build_chat_out(chat, user["id"])
+
+
+# ----------------------------- MESSAGES ----------------------------- #
+@api.get("/chats/{chat_id}/messages", response_model=List[MessageOut])
+async def list_messages(chat_id: str, user=Depends(get_current_user)):
+    chat = await db.chats.find_one({"id": chat_id})
+    if not chat or user["id"] not in chat["member_ids"]:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    msgs = await db.messages.find({"chat_id": chat_id}, {"_id": 0}).sort(
+        "created_at", 1
+    ).to_list(1000)
+    # mark as read
+    await db.messages.update_many(
+        {"chat_id": chat_id, "sender_id": {"$ne": user["id"]}, "read_by": {"$ne": user["id"]}},
+        {"$addToSet": {"read_by": user["id"]}},
+    )
+    return [
+        MessageOut(
+            id=m["id"],
+            chat_id=m["chat_id"],
+            sender_id=m["sender_id"],
+            text=m.get("text"),
+            media_path=m.get("media_path"),
+            media_type=m.get("media_type"),
+            created_at=_iso(m["created_at"]),
+            read_by=m.get("read_by", []),
+        )
+        for m in msgs
+    ]
+
+
+async def _persist_message(chat: dict, sender_id: str, body: SendMessageIn) -> dict:
+    now = datetime.now(timezone.utc)
+    msg_doc = {
+        "id": str(uuid.uuid4()),
+        "chat_id": chat["id"],
+        "sender_id": sender_id,
+        "text": body.text,
+        "media_path": body.media_path,
+        "media_type": body.media_type,
+        "created_at": now,
+        "read_by": [sender_id],
+    }
+    await db.messages.insert_one(msg_doc)
+    await db.chats.update_one({"id": chat["id"]}, {"$set": {"updated_at": now}})
+    return msg_doc
+
+
+@api.post("/messages", response_model=MessageOut)
+async def send_message(body: SendMessageIn, user=Depends(get_current_user)):
+    chat = await db.chats.find_one({"id": body.chat_id})
+    if not chat or user["id"] not in chat["member_ids"]:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if not body.text and not body.media_path:
+        raise HTTPException(status_code=400, detail="Empty message")
+    msg = await _persist_message(chat, user["id"], body)
+    out = MessageOut(
+        id=msg["id"],
+        chat_id=msg["chat_id"],
+        sender_id=msg["sender_id"],
+        text=msg.get("text"),
+        media_path=msg.get("media_path"),
+        media_type=msg.get("media_type"),
+        created_at=_iso(msg["created_at"]),
+        read_by=msg["read_by"],
+    )
+    # broadcast via websocket
+    await manager.broadcast_chat(chat, out.dict())
+    return out
+
+
+# ----------------------------- FILES ----------------------------- #
+@api.post("/upload")
+async def upload(file: UploadFile = File(...), user=Depends(get_current_user)):
+    ext = (file.filename or "file").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
+    obj_path = f"{APP_NAME}/uploads/{user['id']}/{uuid.uuid4()}.{ext}"
+    data = await file.read()
+    content_type = file.content_type or "application/octet-stream"
+    result = await run_in_threadpool(_put_object_sync, obj_path, data, content_type)
+    await db.files.insert_one(
+        {
+            "path": result["path"],
+            "owner_id": user["id"],
+            "content_type": content_type,
+            "size": result.get("size", len(data)),
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+    return {"path": result["path"], "size": result.get("size", len(data))}
+
+
+@api.get("/files/{path:path}")
+async def download(path: str, token: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
+    # Accept either header or query token (for web <img>)
+    user_id: Optional[str] = None
+    if authorization and authorization.lower().startswith("bearer "):
+        user_id = _decode_token_or_none(authorization.split(" ", 1)[1].strip())
+    if not user_id:
+        user_id = _decode_token_or_none(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Verify user exists
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Verify file record exists (any authenticated user can view any uploaded file for now)
+    record = await db.files.find_one({"path": path})
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found")
+    content, ctype = await run_in_threadpool(_get_object_sync, path)
+    return Response(content=content, media_type=ctype)
+
+
+# ----------------------------- WEBSOCKET ----------------------------- #
+class ConnectionManager:
+    def __init__(self) -> None:
+        self.connections: Dict[str, Set[WebSocket]] = {}
+        self.lock = asyncio.Lock()
+
+    async def connect(self, user_id: str, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self.lock:
+            self.connections.setdefault(user_id, set()).add(ws)
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"online": True, "last_seen": datetime.now(timezone.utc)}},
+        )
+
+    async def disconnect(self, user_id: str, ws: WebSocket) -> None:
+        async with self.lock:
+            conns = self.connections.get(user_id)
+            if conns and ws in conns:
+                conns.remove(ws)
+            if conns is not None and not conns:
+                self.connections.pop(user_id, None)
+                await db.users.update_one(
+                    {"id": user_id},
+                    {"$set": {"online": False, "last_seen": datetime.now(timezone.utc)}},
+                )
+
+    async def send_to_user(self, user_id: str, message: dict) -> None:
+        conns = list(self.connections.get(user_id, set()))
+        for ws in conns:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                pass
+
+    async def broadcast_chat(self, chat: dict, message_payload: dict) -> None:
+        for uid in chat["member_ids"]:
+            await self.send_to_user(uid, {"type": "message", "data": message_payload})
+
+
+manager = ConnectionManager()
+
+
+@app.websocket("/api/ws")
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    user_id = _decode_token_or_none(token)
+    if not user_id:
+        await websocket.close(code=1008)
+        return
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        await websocket.close(code=1008)
+        return
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            mtype = data.get("type")
+            if mtype == "ping":
+                await websocket.send_json({"type": "pong"})
+            elif mtype == "typing":
+                chat_id = data.get("chat_id")
+                chat = await db.chats.find_one({"id": chat_id})
+                if chat and user_id in chat["member_ids"]:
+                    for uid in chat["member_ids"]:
+                        if uid != user_id:
+                            await manager.send_to_user(
+                                uid,
+                                {"type": "typing", "chat_id": chat_id, "user_id": user_id},
+                            )
+            elif mtype == "read":
+                chat_id = data.get("chat_id")
+                if chat_id:
+                    await db.messages.update_many(
+                        {
+                            "chat_id": chat_id,
+                            "sender_id": {"$ne": user_id},
+                            "read_by": {"$ne": user_id},
+                        },
+                        {"$addToSet": {"read_by": user_id}},
+                    )
+                    chat = await db.chats.find_one({"id": chat_id})
+                    if chat:
+                        for uid in chat["member_ids"]:
+                            if uid != user_id:
+                                await manager.send_to_user(
+                                    uid,
+                                    {"type": "read", "chat_id": chat_id, "user_id": user_id},
+                                )
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa
+        logger.warning("WS error: %s", exc)
+    finally:
+        await manager.disconnect(user_id, websocket)
+
+
+# ----------------------------- MOUNT ----------------------------- #
+app.include_router(api)
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)

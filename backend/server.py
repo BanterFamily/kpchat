@@ -256,22 +256,38 @@ def is_mock_sms() -> bool:
 async def send_sms_or_mock(phone: str, code: str) -> Optional[str]:
     """Return dev_code in mock mode; return None when real SMS is sent."""
     if is_mock_sms():
+        logger.info("MOCK OTP for %s: %s", phone, code)
         return code
-    # Placeholder Twilio integration seam.
     sid = os.environ["TWILIO_ACCOUNT_SID"]
     auth = os.environ.get("TWILIO_AUTH_TOKEN")
     sender = os.environ.get("TWILIO_FROM")
     if not auth or not sender:
-        raise HTTPException(status_code=500, detail="Twilio belum dikonfigurasi lengkap")
+        raise HTTPException(status_code=500, detail="Twilio belum dikonfigurasi lengkap (TWILIO_AUTH_TOKEN / TWILIO_FROM kosong)")
     try:
         from twilio.rest import Client  # type: ignore
+        from twilio.base.exceptions import TwilioRestException  # type: ignore
     except ImportError:
         raise HTTPException(status_code=500, detail="Paket twilio belum terpasang")
-    await run_in_threadpool(
-        lambda: Client(sid, auth).messages.create(
-            body=f"Kode verifikasi KPChat kamu: {code}", from_=sender, to=phone
+    try:
+        message = await run_in_threadpool(
+            lambda: Client(sid, auth).messages.create(
+                body=f"Kode verifikasi KPChat kamu: {code}. Jangan bagikan ke siapa pun.",
+                from_=sender,
+                to=phone,
+            )
         )
-    )
+        logger.info("Twilio SMS queued sid=%s to=%s", getattr(message, "sid", "?"), phone)
+    except TwilioRestException as exc:
+        logger.warning("Twilio send failed to=%s status=%s code=%s msg=%s", phone, exc.status, exc.code, exc.msg)
+        # 21608 = trial account: number not verified
+        if exc.code == 21608:
+            raise HTTPException(status_code=400, detail="Nomor ini belum diverifikasi di Twilio trial. Verifikasi dulu di Twilio Console, atau upgrade ke paid account.")
+        if exc.code in (21211, 21614):
+            raise HTTPException(status_code=400, detail="Nomor tidak valid untuk SMS")
+        raise HTTPException(status_code=502, detail=f"Gagal kirim SMS: {exc.msg}")
+    except Exception as exc:  # noqa
+        logger.exception("Twilio unexpected error: %s", exc)
+        raise HTTPException(status_code=502, detail="Gagal kirim SMS")
     return None
 
 

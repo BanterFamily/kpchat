@@ -1,22 +1,19 @@
 import { useRef, useState } from "react";
-import {
-  View, Text, TextInput, Pressable, StyleSheet, KeyboardAvoidingView,
-  Platform, ActivityIndicator, ScrollView,
-} from "react-native";
+import { View, Text, TextInput, Pressable, StyleSheet, ActivityIndicator } from "react-native";
 import { useRouter } from "expo-router";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { useAuth } from "@/src/auth-context";
 import { useTheme, spacing, radius } from "@/src/theme";
 import { AppLogo } from "@/src/components/AppLogo";
+import { AuthContainer, useResponsiveLogoSize } from "@/src/components/AuthContainer";
 import { CountryPicker, CountryPickerRef } from "@/src/components/CountryPicker";
 import { Country, DEFAULT_COUNTRY } from "@/src/data/countries";
 
 export default function LoginScreen() {
   const { requestOtp } = useAuth();
   const router = useRouter();
-  const insets = useSafeAreaInsets();
   const { colors } = useTheme();
+  const logoSize = useResponsiveLogoSize(104);
   const [country, setCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [localPhone, setLocalPhone] = useState("");
   const [loading, setLoading] = useState(false);
@@ -39,16 +36,9 @@ export default function LoginScreen() {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.flex, { backgroundColor: colors.surface }]}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <ScrollView
-        contentContainerStyle={[styles.scroll, { paddingTop: insets.top + spacing.xl, paddingBottom: insets.bottom + spacing.xl }]}
-        keyboardShouldPersistTaps="handled"
-      >
-        <AppLogo size={104} />
-        <Text style={[styles.brand, { color: colors.brandPrimary }]}>KPChat</Text>
+    <>
+      <AuthContainer backgroundColor={colors.surface}>
+        <AppLogo size={logoSize} />
         <Text style={[styles.title, { color: colors.onSurface }]}>Selamat Datang</Text>
         <Text style={[styles.subtitle, { color: colors.muted }]}>Masuk dengan nomor telepon</Text>
 
@@ -102,18 +92,14 @@ export default function LoginScreen() {
             </Text>
           </Pressable>
         </View>
-      </ScrollView>
-
+      </AuthContainer>
       <CountryPicker ref={pickerRef} onSelect={setCountry} selected={country} />
-    </KeyboardAvoidingView>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  scroll: { flexGrow: 1, paddingHorizontal: spacing.xl, justifyContent: "center" },
-  brand: { fontSize: 32, fontWeight: "800", textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.md, letterSpacing: -0.5 },
-  title: { fontSize: 22, fontWeight: "700", textAlign: "center" },
+  title: { fontSize: 24, fontWeight: "700", textAlign: "center", marginTop: spacing.lg },
   subtitle: { fontSize: 15, textAlign: "center", marginTop: spacing.xs, marginBottom: spacing.xl },
   form: { gap: spacing.md },
   phoneRow: { flexDirection: "row", gap: spacing.sm },

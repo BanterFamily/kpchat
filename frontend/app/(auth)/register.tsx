@@ -1,22 +1,19 @@
 import { useRef, useState } from "react";
-import {
-  View, Text, TextInput, Pressable, StyleSheet, KeyboardAvoidingView,
-  Platform, ActivityIndicator, ScrollView,
-} from "react-native";
+import { View, Text, TextInput, Pressable, StyleSheet, ActivityIndicator } from "react-native";
 import { useRouter } from "expo-router";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { useAuth } from "@/src/auth-context";
 import { useTheme, spacing, radius } from "@/src/theme";
 import { AppLogo } from "@/src/components/AppLogo";
+import { AuthContainer, useResponsiveLogoSize } from "@/src/components/AuthContainer";
 import { CountryPicker, CountryPickerRef } from "@/src/components/CountryPicker";
 import { Country, DEFAULT_COUNTRY } from "@/src/data/countries";
 
 export default function RegisterScreen() {
   const { requestOtp } = useAuth();
   const router = useRouter();
-  const insets = useSafeAreaInsets();
   const { colors } = useTheme();
+  const logoSize = useResponsiveLogoSize(92);
   const [name, setName] = useState("");
   const [country, setCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [localPhone, setLocalPhone] = useState("");
@@ -45,17 +42,13 @@ export default function RegisterScreen() {
   }
 
   return (
-    <KeyboardAvoidingView style={[styles.flex, { backgroundColor: colors.surface }]} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-      <ScrollView
-        contentContainerStyle={[styles.scroll, { paddingTop: insets.top + spacing.xl, paddingBottom: insets.bottom + spacing.xl }]}
-        keyboardShouldPersistTaps="handled"
-      >
+    <>
+      <AuthContainer backgroundColor={colors.surface}>
         <Pressable testID="back-to-login" onPress={() => router.back()} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={28} color={colors.brandPrimary} />
         </Pressable>
 
-        <AppLogo size={92} />
-        <Text style={[styles.brand, { color: colors.brandPrimary }]}>KPChat</Text>
+        <AppLogo size={logoSize} />
         <Text style={[styles.title, { color: colors.onSurface }]}>Buat Akun</Text>
         <Text style={[styles.subtitle, { color: colors.muted }]}>Daftar dengan nomor telepon</Text>
 
@@ -110,19 +103,15 @@ export default function RegisterScreen() {
               <Text style={[styles.ctaText, { color: colors.onBrandPrimary }]}>Kirim Kode OTP</Text>}
           </Pressable>
         </View>
-      </ScrollView>
-
+      </AuthContainer>
       <CountryPicker ref={pickerRef} onSelect={setCountry} selected={country} />
-    </KeyboardAvoidingView>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  scroll: { flexGrow: 1, paddingHorizontal: spacing.xl },
   backBtn: { alignSelf: "flex-start", padding: spacing.xs, marginBottom: spacing.sm },
-  brand: { fontSize: 30, fontWeight: "800", textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.md, letterSpacing: -0.5 },
-  title: { fontSize: 22, fontWeight: "700", textAlign: "center" },
+  title: { fontSize: 22, fontWeight: "700", textAlign: "center", marginTop: spacing.md },
   subtitle: { fontSize: 15, textAlign: "center", marginTop: spacing.xs, marginBottom: spacing.xl },
   form: { gap: spacing.md },
   inputWrap: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingHorizontal: spacing.lg, height: 52, borderRadius: radius.lg, borderWidth: StyleSheet.hairlineWidth },

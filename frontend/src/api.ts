@@ -66,6 +66,7 @@ export type User = {
   avatar_path: string | null;
   online: boolean;
   last_seen: string | null;
+  read_receipts_enabled: boolean;
 };
 
 export type Message = {
@@ -94,6 +95,7 @@ export type Chat = {
   avatar_path: string | null;
   member_ids: string[];
   members: User[];
+  created_by: string | null;
   last_message: {
     id: string;
     text: string | null;

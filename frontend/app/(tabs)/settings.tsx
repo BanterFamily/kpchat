@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Alert, TextInput, Platform } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView, Alert, TextInput, Switch } from "react-native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@react-native-vector-icons/ionicons";
@@ -104,6 +104,29 @@ export default function SettingsScreen() {
         )}
       </View>
 
+      <Text style={[styles.sectionLabel, { color: colors.muted }]}>PRIVASI</Text>
+      <View style={[styles.groupCard, { backgroundColor: colors.surfaceSecondary }]}>
+        <View style={styles.settingRow}>
+          <Ionicons name="checkmark-done-outline" size={22} color={colors.brandSecondary} />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.settingLabel, { color: colors.onSurface }]}>Tanda Baca (Blue Ticks)</Text>
+            <Text style={[styles.settingSub, { color: colors.muted }]}>Jika dimatikan, teman tidak melihat centang biru saat kamu membaca pesan mereka.</Text>
+          </View>
+          <Switch
+            testID="read-receipts-toggle"
+            value={user?.read_receipts_enabled ?? true}
+            onValueChange={async (v) => {
+              try {
+                const updated = await apiFetch("/auth/me", { method: "PATCH", body: JSON.stringify({ read_receipts_enabled: v }) });
+                setUser(updated);
+              } catch (e: any) { Alert.alert("Gagal", e.message ?? ""); }
+            }}
+            trackColor={{ false: colors.surfaceTertiary, true: colors.brandPrimary }}
+            thumbColor="#fff"
+          />
+        </View>
+      </View>
+
       <Text style={[styles.sectionLabel, { color: colors.muted }]}>AKUN</Text>
       <View style={[styles.groupCard, { backgroundColor: colors.surfaceSecondary }]}>
         <SettingRow icon="notifications-outline" label="Notifikasi" />
@@ -126,7 +149,7 @@ function SettingRow({ icon, label }: { icon: any; label: string }) {
   return (
     <View style={styles.settingRow}>
       <Ionicons name={icon} size={22} color={colors.brandSecondary} />
-      <Text style={[styles.settingLabel, { color: colors.onSurface }]}>{label}</Text>
+      <Text style={[styles.settingLabel, { color: colors.onSurface, flex: 1 }]}>{label}</Text>
       <Ionicons name="chevron-forward" size={18} color={colors.muted} />
     </View>
   );
@@ -147,7 +170,8 @@ const styles = StyleSheet.create({
   aboutInput: { flex: 1, fontSize: 15, paddingVertical: spacing.xs, borderBottomWidth: StyleSheet.hairlineWidth },
   groupCard: { marginHorizontal: spacing.lg, borderRadius: radius.lg, overflow: "hidden" },
   settingRow: { flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  settingLabel: { flex: 1, fontSize: 16 },
+  settingLabel: { fontSize: 16 },
+  settingSub: { fontSize: 12, marginTop: 2 },
   divider: { height: StyleSheet.hairlineWidth, marginLeft: 54 },
   logoutBtn: { marginHorizontal: spacing.lg, marginTop: spacing.xl, borderRadius: radius.lg, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, paddingVertical: spacing.md },
   logoutText: { fontSize: 16, fontWeight: "600" },

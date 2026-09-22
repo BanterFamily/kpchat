@@ -162,6 +162,7 @@ class UserOut(BaseModel):
     avatar_path: Optional[str] = None
     online: bool = False
     last_seen: Optional[str] = None
+    read_receipts_enabled: bool = True
 
 
 class TokenOut(BaseModel):
@@ -174,12 +175,22 @@ class UpdateProfileIn(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=60)
     about: Optional[str] = Field(default=None, max_length=160)
     avatar_path: Optional[str] = None
+    read_receipts_enabled: Optional[bool] = None
 
 
 class CreateChatIn(BaseModel):
     kind: Literal["direct", "group"] = "direct"
     member_ids: List[str]
     name: Optional[str] = None  # for group chats
+
+
+class UpdateChatIn(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    avatar_path: Optional[str] = Field(default=None, max_length=512)
+
+
+class AddMembersIn(BaseModel):
+    member_ids: List[str] = Field(min_length=1, max_length=50)
 
 
 class ChatOut(BaseModel):
@@ -189,6 +200,7 @@ class ChatOut(BaseModel):
     avatar_path: Optional[str] = None
     member_ids: List[str]
     members: List[UserOut]
+    created_by: Optional[str] = None
     last_message: Optional[dict] = None
     unread_count: int = 0
     updated_at: str
@@ -325,6 +337,7 @@ def user_to_out(u: dict) -> UserOut:
         avatar_path=u.get("avatar_path"),
         online=bool(u.get("online", False)),
         last_seen=_iso(u.get("last_seen")),
+        read_receipts_enabled=u.get("read_receipts_enabled", True),
     )
 
 
@@ -493,6 +506,7 @@ async def _build_chat_out(chat: dict, viewer_id: str) -> ChatOut:
         avatar_path=chat.get("avatar_path"),
         member_ids=chat["member_ids"],
         members=members,
+        created_by=chat.get("created_by"),
         last_message=last_msg,
         unread_count=unread,
         updated_at=_iso(chat.get("updated_at", chat.get("created_at"))),
@@ -548,9 +562,97 @@ async def get_chat(chat_id: str, user=Depends(get_current_user)):
     return await _build_chat_out(chat, user["id"])
 
 
+# ----------------------------- GROUP ADMIN ----------------------------- #
+async def _require_group_admin(chat_id: str, user_id: str) -> dict:
+    chat = await db.chats.find_one({"id": chat_id})
+    if not chat or user_id not in chat["member_ids"]:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if chat.get("kind") != "group":
+        raise HTTPException(status_code=400, detail="Aksi hanya berlaku untuk grup")
+    if chat.get("created_by") != user_id:
+        raise HTTPException(status_code=403, detail="Hanya admin grup yang bisa mengubah ini")
+    return chat
+
+
+@api.patch("/chats/{chat_id}", response_model=ChatOut)
+async def update_chat(chat_id: str, body: UpdateChatIn, user=Depends(get_current_user)):
+    chat = await _require_group_admin(chat_id, user["id"])
+    updates: dict = {}
+    if body.name is not None:
+        updates["name"] = body.name.strip()
+    if body.avatar_path is not None:
+        # empty string clears the avatar
+        updates["avatar_path"] = body.avatar_path or None
+    if not updates:
+        raise HTTPException(status_code=400, detail="Tidak ada perubahan")
+    updates["updated_at"] = datetime.now(timezone.utc)
+    await db.chats.update_one({"id": chat_id}, {"$set": updates})
+    updated = await db.chats.find_one({"id": chat_id}, {"_id": 0})
+    out = await _build_chat_out(updated, user["id"])
+    await manager.broadcast_chat(updated, {"_event": "chat_updated", "chat": out.dict()})
+    return out
+
+
+@api.post("/chats/{chat_id}/members", response_model=ChatOut)
+async def add_members(chat_id: str, body: AddMembersIn, user=Depends(get_current_user)):
+    chat = await _require_group_admin(chat_id, user["id"])
+    new_ids = [mid for mid in body.member_ids if mid and mid not in chat["member_ids"]]
+    if not new_ids:
+        raise HTTPException(status_code=400, detail="Anggota sudah ada atau kosong")
+    valid = await db.users.find({"id": {"$in": new_ids}}, {"_id": 0, "id": 1}).to_list(100)
+    valid_ids = [v["id"] for v in valid]
+    unknown = set(new_ids) - set(valid_ids)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Pengguna tidak ditemukan: {', '.join(sorted(unknown))}")
+    now = datetime.now(timezone.utc)
+    await db.chats.update_one(
+        {"id": chat_id},
+        {"$addToSet": {"member_ids": {"$each": valid_ids}}, "$set": {"updated_at": now}},
+    )
+    updated = await db.chats.find_one({"id": chat_id}, {"_id": 0})
+    out = await _build_chat_out(updated, user["id"])
+    await manager.broadcast_chat(updated, {"_event": "chat_updated", "chat": out.dict()})
+    return out
+
+
+@api.delete("/chats/{chat_id}/members/{member_id}", response_model=ChatOut)
+async def remove_member(chat_id: str, member_id: str, user=Depends(get_current_user)):
+    chat = await db.chats.find_one({"id": chat_id})
+    if not chat or user["id"] not in chat["member_ids"]:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if chat.get("kind") != "group":
+        raise HTTPException(status_code=400, detail="Aksi hanya berlaku untuk grup")
+    is_admin = chat.get("created_by") == user["id"]
+    is_self_leave = member_id == user["id"]
+    if not (is_admin or is_self_leave):
+        raise HTTPException(status_code=403, detail="Tidak diizinkan menghapus anggota")
+    if member_id not in chat["member_ids"]:
+        raise HTTPException(status_code=404, detail="Anggota tidak ditemukan")
+    if is_admin and member_id == chat.get("created_by") and not is_self_leave:
+        raise HTTPException(status_code=400, detail="Admin tidak dapat dihapus")
+    now = datetime.now(timezone.utc)
+    await db.chats.update_one(
+        {"id": chat_id},
+        {"$pull": {"member_ids": member_id}, "$set": {"updated_at": now}},
+    )
+    updated = await db.chats.find_one({"id": chat_id}, {"_id": 0})
+    # Notify the removed user too (before ChatOut is built for the requester's view).
+    out_for_admin = await _build_chat_out(updated, user["id"])
+    await manager.broadcast_chat(updated, {"_event": "chat_updated", "chat": out_for_admin.dict()})
+    await manager.send_to_user(
+        member_id,
+        {"_event": "removed_from_chat", "chat_id": chat_id},
+    )
+    return out_for_admin
+
+
 # ----------------------------- MESSAGES ----------------------------- #
-def _msg_to_out(m: dict) -> MessageOut:
+def _msg_to_out(m: dict, viewer_id: Optional[str] = None, private_ids: Optional[Set[str]] = None) -> MessageOut:
     reply = m.get("reply_to")
+    read_by = list(m.get("read_by", []))
+    if private_ids:
+        # Hide reads from users whose read_receipts_enabled is false, except the viewer themselves.
+        read_by = [uid for uid in read_by if uid == viewer_id or uid not in private_ids]
     return MessageOut(
         id=m["id"],
         chat_id=m["chat_id"],
@@ -560,10 +662,21 @@ def _msg_to_out(m: dict) -> MessageOut:
         media_type=m.get("media_type"),
         audio_duration_ms=m.get("audio_duration_ms"),
         created_at=_iso(m["created_at"]),
-        read_by=m.get("read_by", []),
+        read_by=read_by,
         reply_to=ReplyPreview(**reply) if reply else None,
         reactions=m.get("reactions", {}),
     )
+
+
+async def _private_read_receipt_ids(member_ids: List[str]) -> Set[str]:
+    """Return user IDs (from `member_ids`) who have DISABLED read receipts."""
+    if not member_ids:
+        return set()
+    docs = await db.users.find(
+        {"id": {"$in": member_ids}, "read_receipts_enabled": False},
+        {"_id": 0, "id": 1},
+    ).to_list(200)
+    return {d["id"] for d in docs}
 
 
 @api.get("/chats/{chat_id}/messages", response_model=List[MessageOut])
@@ -574,12 +687,18 @@ async def list_messages(chat_id: str, user=Depends(get_current_user)):
     msgs = await db.messages.find({"chat_id": chat_id}, {"_id": 0}).sort(
         "created_at", 1
     ).to_list(1000)
-    # mark as read
+    # Mark as read for the viewer's own unread counters (privacy still hides this from
+    # other members when we serialise the response for them via WS/read events).
     await db.messages.update_many(
         {"chat_id": chat_id, "sender_id": {"$ne": user["id"]}, "read_by": {"$ne": user["id"]}},
         {"$addToSet": {"read_by": user["id"]}},
     )
-    return [_msg_to_out(m) for m in msgs]
+    private_ids = await _private_read_receipt_ids(chat["member_ids"])
+    # Refresh docs after the update so returned read_by is fresh.
+    msgs = await db.messages.find({"chat_id": chat_id}, {"_id": 0}).sort(
+        "created_at", 1
+    ).to_list(1000)
+    return [_msg_to_out(m, viewer_id=user["id"], private_ids=private_ids) for m in msgs]
 
 
 async def _persist_message(chat: dict, sender_id: str, body: SendMessageIn) -> dict:
@@ -620,7 +739,8 @@ async def send_message(body: SendMessageIn, user=Depends(get_current_user)):
     if not body.text and not body.media_path:
         raise HTTPException(status_code=400, detail="Empty message")
     msg = await _persist_message(chat, user["id"], body)
-    out = _msg_to_out(msg)
+    private_ids = await _private_read_receipt_ids(chat["member_ids"])
+    out = _msg_to_out(msg, viewer_id=user["id"], private_ids=private_ids)
     await manager.broadcast_chat(chat, out.dict())
     return out
 
@@ -650,7 +770,8 @@ async def react_to_message(message_id: str, body: ReactIn, user=Depends(get_curr
             reactions[emoji].append(user["id"])
     await db.messages.update_one({"id": message_id}, {"$set": {"reactions": reactions}})
     updated = await db.messages.find_one({"id": message_id}, {"_id": 0})
-    out = _msg_to_out(updated)
+    private_ids = await _private_read_receipt_ids(chat["member_ids"])
+    out = _msg_to_out(updated, viewer_id=user["id"], private_ids=private_ids)
     await manager.broadcast_chat(chat, {**out.dict(), "_event": "reaction"})
     return out
 
@@ -844,14 +965,17 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
                         },
                         {"$addToSet": {"read_by": user_id}},
                     )
-                    chat = await db.chats.find_one({"id": chat_id})
-                    if chat:
-                        for uid in chat["member_ids"]:
-                            if uid != user_id:
-                                await manager.send_to_user(
-                                    uid,
-                                    {"type": "read", "chat_id": chat_id, "user_id": user_id},
-                                )
+                    # Only broadcast the reader's identity if they have read receipts enabled.
+                    reader = await db.users.find_one({"id": user_id}, {"_id": 0, "read_receipts_enabled": 1})
+                    if reader and reader.get("read_receipts_enabled", True):
+                        chat = await db.chats.find_one({"id": chat_id})
+                        if chat:
+                            for uid in chat["member_ids"]:
+                                if uid != user_id:
+                                    await manager.send_to_user(
+                                        uid,
+                                        {"type": "read", "chat_id": chat_id, "user_id": user_id},
+                                    )
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa

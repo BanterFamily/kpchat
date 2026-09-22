@@ -229,11 +229,19 @@ export default function ChatDetail() {
         <Pressable testID="chat-back" onPress={() => router.back()} style={styles.hbtn}>
           <Ionicons name="chevron-back" size={26} color={colors.onBrandSecondary} />
         </Pressable>
-        <AvatarSmall path={chat?.kind === "group" ? chat?.avatar_path : other?.avatar_path} name={headerTitle} />
-        <View style={{ flex: 1, marginLeft: spacing.sm }}>
-          <Text numberOfLines={1} style={[styles.htitle, { color: colors.onBrandSecondary }]}>{headerTitle}</Text>
-          <Text numberOfLines={1} style={[styles.hsub, { color: colors.onBrandSecondary, opacity: 0.85 }]}>{headerSub}</Text>
-        </View>
+        <Pressable
+          testID="chat-header-info"
+          onPress={() => {
+            if (chat?.kind === "group") router.push({ pathname: "/chat/[id]/info", params: { id: String(id) } });
+          }}
+          style={styles.headerCenter}
+        >
+          <AvatarSmall path={chat?.kind === "group" ? chat?.avatar_path : other?.avatar_path} name={headerTitle} />
+          <View style={{ flex: 1, marginLeft: spacing.sm }}>
+            <Text numberOfLines={1} style={[styles.htitle, { color: colors.onBrandSecondary }]}>{headerTitle}</Text>
+            <Text numberOfLines={1} style={[styles.hsub, { color: colors.onBrandSecondary, opacity: 0.85 }]}>{headerSub}</Text>
+          </View>
+        </Pressable>
         <Pressable style={styles.hbtn}><Ionicons name="videocam" size={22} color={colors.onBrandSecondary} /></Pressable>
         <Pressable style={styles.hbtn}><Ionicons name="call" size={20} color={colors.onBrandSecondary} /></Pressable>
       </View>
@@ -415,6 +423,7 @@ export default function ChatDetail() {
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   header: { flexDirection: "row", alignItems: "center", paddingHorizontal: spacing.sm, paddingBottom: spacing.sm, gap: 2 },
+  headerCenter: { flex: 1, flexDirection: "row", alignItems: "center" },
   hbtn: { padding: spacing.sm },
   htitle: { fontSize: 16, fontWeight: "600" },
   hsub: { fontSize: 12, marginTop: 1 },

@@ -1,7 +1,16 @@
-"""Backend tests for reply/react/audio features (iteration 2)."""
+"""Backend tests for reply/react/audio features (iteration 2).
+
+Auth was migrated from email+password to phone+OTP (see commit "Rebrand Biru &
+Auth Nomor + OTP"), so the fixtures below register throwaway accounts through
+``/auth/otp/request`` + ``/auth/otp/verify`` instead of the removed
+``/auth/login`` endpoint. Each run uses timestamp-derived phone numbers so the
+per-phone OTP cooldown never kicks in.
+"""
 import io
 import os
 import time
+import uuid
+
 import pytest
 import requests
 
@@ -9,20 +18,39 @@ BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
 
-def _login(email: str, password: str) -> dict:
-    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password}, timeout=30)
+def _unique_phone(offset: int) -> str:
+    return f"+1555{int(time.time()) % 10_000_000:07d}{offset}"
+
+
+def _register(name: str, offset: int) -> dict:
+    """Create a fresh account via the phone+OTP flow and return the auth payload."""
+    phone = _unique_phone(offset)
+    r = requests.post(
+        f"{API}/auth/otp/request",
+        json={"phone": phone, "purpose": "register", "name": name},
+        timeout=30,
+    )
+    assert r.status_code == 200, r.text
+    dev_code = r.json().get("dev_code")
+    assert dev_code, "ALLOW_DEV_OTP must be true (or Twilio configured) to run this suite"
+
+    r = requests.post(
+        f"{API}/auth/otp/verify",
+        json={"phone": phone, "code": dev_code, "purpose": "register", "name": name},
+        timeout=30,
+    )
     assert r.status_code == 200, r.text
     return r.json()
 
 
 @pytest.fixture(scope="module")
 def alice():
-    return _login("alice@test.com", "password123")
+    return _register("Alice", 1)
 
 
 @pytest.fixture(scope="module")
 def bob():
-    return _login("bob@test.com", "password123")
+    return _register("Bob", 2)
 
 
 def _h(tok: dict) -> dict:

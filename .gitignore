@@ -86,3 +86,12 @@ android-sdk/
 credentials.json
 *.key
 .credentials
+
+# Expo / Metro build caches
+.expo/
+.metro-cache/
+.ruff_cache/
+
+# Allow env templates
+!.env.example
+!**/.env.example

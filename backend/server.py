@@ -41,6 +41,14 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = "HS256"
 JWT_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "43200"))
+ALLOW_DEV_OTP = (os.environ.get("ALLOW_DEV_OTP", "false") or "").strip().lower() in ("1", "true", "yes")
+ALLOWED_ORIGINS_RAW = (os.environ.get("ALLOWED_ORIGINS") or "").strip()
+ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS_RAW.split(",") if o.strip()]
+
+# Upload / message size caps.
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB
+MAX_TEXT_LEN = 4000
+ALLOWED_UPLOAD_PREFIXES = ("image/", "video/", "audio/", "application/pdf")
 
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
 STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
@@ -188,11 +196,11 @@ class ChatOut(BaseModel):
 
 class SendMessageIn(BaseModel):
     chat_id: str
-    text: Optional[str] = None
-    media_path: Optional[str] = None
+    text: Optional[str] = Field(default=None, max_length=4000)
+    media_path: Optional[str] = Field(default=None, max_length=512)
     media_type: Optional[Literal["image", "video", "audio", "file"]] = None
-    audio_duration_ms: Optional[int] = None
-    reply_to_id: Optional[str] = None
+    audio_duration_ms: Optional[int] = Field(default=None, ge=0, le=5 * 60 * 1000)
+    reply_to_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class ReplyPreview(BaseModel):
@@ -254,8 +262,11 @@ def is_mock_sms() -> bool:
 
 
 async def send_sms_or_mock(phone: str, code: str) -> Optional[str]:
-    """Return dev_code in mock mode; return None when real SMS is sent."""
+    """Return dev_code in mock mode ONLY when ALLOW_DEV_OTP=true; otherwise return None."""
     if is_mock_sms():
+        if not ALLOW_DEV_OTP:
+            logger.warning("OTP requested but no SMS provider is configured and ALLOW_DEV_OTP is false")
+            raise HTTPException(status_code=503, detail="Layanan SMS belum dikonfigurasi. Hubungi admin.")
         logger.info("MOCK OTP for %s: %s", phone, code)
         return code
     sid = os.environ["TWILIO_ACCOUNT_SID"]
@@ -645,12 +656,64 @@ async def react_to_message(message_id: str, body: ReactIn, user=Depends(get_curr
 
 
 # ----------------------------- FILES ----------------------------- #
+_SAFE_SERVE_TYPES = {
+    "image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif",
+    "video/mp4", "video/quicktime", "video/webm",
+    "audio/mpeg", "audio/mp4", "audio/aac", "audio/m4a", "audio/x-m4a", "audio/wav", "audio/webm", "audio/ogg",
+    "application/pdf",
+}
+
+
+def _pick_safe_content_type(claimed: str) -> str:
+    """Return the claimed content type only if it is in a safe allowlist; else generic binary."""
+    ct = (claimed or "").split(";")[0].strip().lower()
+    if ct in _SAFE_SERVE_TYPES:
+        return ct
+    return "application/octet-stream"
+
+
+async def _user_may_view(user_id: str, path: str, record: dict) -> bool:
+    """A user may view a file when they own it OR it is referenced in a chat they belong to."""
+    if record.get("owner_id") == user_id:
+        return True
+    own_user = await db.users.find_one({"id": user_id, "avatar_path": path}, {"_id": 0})
+    if own_user:
+        return True
+    # Any user (including owner) can see it if it appears in a chat they belong to.
+    chat_ids = await db.messages.distinct("chat_id", {"media_path": path})
+    if chat_ids:
+        member = await db.chats.find_one(
+            {"id": {"$in": chat_ids}, "member_ids": user_id}, {"_id": 0, "id": 1}
+        )
+        if member:
+            return True
+    # Group / user avatars stored on the user profile (any authenticated user can view avatars).
+    peer_with_avatar = await db.users.find_one({"avatar_path": path}, {"_id": 0, "id": 1})
+    if peer_with_avatar:
+        return True
+    return False
+
+
 @api.post("/upload")
 async def upload(file: UploadFile = File(...), user=Depends(get_current_user)):
     ext = (file.filename or "file").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
+    ext = re.sub(r"[^a-z0-9]+", "", ext)[:8] or "bin"
+    content_type = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
+    if not any(content_type.startswith(pfx) for pfx in ALLOWED_UPLOAD_PREFIXES):
+        raise HTTPException(status_code=415, detail="Tipe berkas tidak diizinkan")
+
+    # Stream & enforce max size.
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"Berkas melebihi {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+
     obj_path = f"{APP_NAME}/uploads/{user['id']}/{uuid.uuid4()}.{ext}"
-    data = await file.read()
-    content_type = file.content_type or "application/octet-stream"
+    data = bytes(buf)
     result = await run_in_threadpool(_put_object_sync, obj_path, data, content_type)
     await db.files.insert_one(
         {
@@ -666,7 +729,7 @@ async def upload(file: UploadFile = File(...), user=Depends(get_current_user)):
 
 @api.get("/files/{path:path}")
 async def download(path: str, token: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
-    # Accept either header or query token (for web <img>)
+    # Accept either header or query token (query token is required for web <img> tags).
     user_id: Optional[str] = None
     if authorization and authorization.lower().startswith("bearer "):
         user_id = _decode_token_or_none(authorization.split(" ", 1)[1].strip())
@@ -674,16 +737,30 @@ async def download(path: str, token: Optional[str] = None, authorization: Option
         user_id = _decode_token_or_none(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    # Verify user exists
     user = await db.users.find_one({"id": user_id})
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    # Verify file record exists (any authenticated user can view any uploaded file for now)
+    # Basic path traversal guard.
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
     record = await db.files.find_one({"path": path})
     if not record:
         raise HTTPException(status_code=404, detail="File not found")
+    if not await _user_may_view(user_id, path, record):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
     content, ctype = await run_in_threadpool(_get_object_sync, path)
-    return Response(content=content, media_type=ctype)
+    safe_ctype = _pick_safe_content_type(record.get("content_type") or ctype or "")
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=300",
+    }
+    # Force attachment for anything not in the safe inline allowlist so browsers do not
+    # render attacker-supplied HTML/JS same-origin.
+    if safe_ctype == "application/octet-stream":
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", path.rsplit("/", 1)[-1])[:80] or "file"
+        headers["Content-Disposition"] = f'attachment; filename="{safe_name}"'
+    return Response(content=content, media_type=safe_ctype, headers=headers)
 
 
 # ----------------------------- WEBSOCKET ----------------------------- #
@@ -785,10 +862,20 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
 
 # ----------------------------- MOUNT ----------------------------- #
 app.include_router(api)
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_credentials=True,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    # No credentialled requests (we use bearer tokens, not cookies) so wildcard is safe here.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_credentials=False,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )

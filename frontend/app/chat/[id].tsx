@@ -21,6 +21,7 @@ import { useAuth } from "@/src/auth-context";
 import { wsClient, WSEvent } from "@/src/ws";
 import { AudioMessage } from "@/src/components/AudioMessage";
 import { MessageActionsSheet, MessageActionsRef } from "@/src/components/MessageActionsSheet";
+import { ForwardPickerSheet, ForwardPickerRef } from "@/src/components/ForwardPickerSheet";
 
 function timeOnly(iso: string) {
   const d = new Date(iso);
@@ -71,6 +72,7 @@ export default function ChatDetail() {
   const typingTimer = useRef<any>(null);
   const listRef = useRef<FlatList<Message>>(null);
   const actionsRef = useRef<MessageActionsRef>(null);
+  const forwardRef = useRef<ForwardPickerRef>(null);
   const recordStartRef = useRef<number>(0);
 
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -102,7 +104,9 @@ export default function ChatDetail() {
     const off = wsClient.on((e: WSEvent) => {
       if (e.type === "message" && e.data?.chat_id === id) {
         const incoming: Message = e.data;
-        const isReaction = (e.data as any)._event === "reaction";
+        const evName = (e.data as any)._event;
+        const isReaction = evName === "reaction";
+        const isDeleted = evName === "deleted";
         setMessages((prev) => {
           const list = prev ?? [];
           const idx = list.findIndex((m) => m.id === incoming.id);
@@ -111,10 +115,10 @@ export default function ChatDetail() {
             copy[idx] = { ...copy[idx], ...incoming };
             return copy;
           }
-          if (isReaction) return list; // reaction for unknown msg, ignore
+          if (isReaction || isDeleted) return list;
           return [...list, incoming];
         });
-        if (!isReaction) wsClient.send({ type: "read", chat_id: id });
+        if (!isReaction && !isDeleted) wsClient.send({ type: "read", chat_id: id });
       } else if (e.type === "typing" && e.chat_id === id && e.user_id !== user?.id) {
         setPeerTyping(true);
         if (typingTimer.current) clearTimeout(typingTimer.current);
@@ -216,6 +220,21 @@ export default function ChatDetail() {
     } catch (e: any) { Alert.alert("Gagal", e.message ?? ""); }
   }
 
+  async function deleteForEveryone(m: Message) {
+    Alert.alert(
+      "Hapus pesan",
+      "Pesan akan dihapus untuk semua orang. Lanjut?",
+      [
+        { text: "Batal", style: "cancel" },
+        { text: "Hapus", style: "destructive", onPress: async () => {
+          try {
+            await apiFetch(`/messages/${m.id}`, { method: "DELETE" });
+          } catch (e: any) { Alert.alert("Gagal", e.message ?? ""); }
+        }},
+      ],
+    );
+  }
+
   const recordingDurationSec = Math.floor((recorderState?.durationMillis ?? 0) / 1000);
   const isRecording = !!recorderState?.isRecording;
 
@@ -282,9 +301,25 @@ export default function ChatDetail() {
                     },
                   ]}
                 >
-                  {senderName ? <Text style={[styles.sender, { color: colors.brandSecondary }]}>{senderName}</Text> : null}
+                  {senderName && !item.is_deleted ? <Text style={[styles.sender, { color: colors.brandSecondary }]}>{senderName}</Text> : null}
 
-                  {rp ? (
+                  {item.forwarded && !item.is_deleted ? (
+                    <View style={styles.forwardedRow}>
+                      <Ionicons name="arrow-redo" size={12} color={mine ? colors.onBrandTertiary : colors.muted} style={{ opacity: 0.75 }} />
+                      <Text style={[styles.forwardedText, { color: mine ? colors.onBrandTertiary : colors.muted, opacity: 0.75 }]}>Diteruskan</Text>
+                    </View>
+                  ) : null}
+
+                  {item.is_deleted ? (
+                    <View style={styles.deletedRow} testID={`deleted-${item.id}`}>
+                      <Ionicons name="ban" size={14} color={mine ? colors.onBrandTertiary : colors.muted} style={{ opacity: 0.75 }} />
+                      <Text style={[styles.deletedText, { color: mine ? colors.onBrandTertiary : colors.muted }]}>
+                        {mine ? "Kamu menghapus pesan ini" : "Pesan ini telah dihapus"}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {!item.is_deleted && rp ? (
                     <View style={[styles.replyQuote, {
                       backgroundColor: mine ? "rgba(7,94,84,0.10)" : colors.surfaceSecondary,
                       borderLeftColor: colors.brandPrimary,
@@ -296,11 +331,11 @@ export default function ChatDetail() {
                     </View>
                   ) : null}
 
-                  {item.media_type === "image" && item.media_path ? <ChatMedia path={item.media_path} /> : null}
-                  {item.media_type === "audio" && item.media_path ? (
+                  {!item.is_deleted && item.media_type === "image" && item.media_path ? <ChatMedia path={item.media_path} /> : null}
+                  {!item.is_deleted && item.media_type === "audio" && item.media_path ? (
                     <AudioMessage messageId={item.id} path={item.media_path} durationMs={item.audio_duration_ms ?? null} mine={mine} />
                   ) : null}
-                  {item.text ? (
+                  {!item.is_deleted && item.text ? (
                     <Text style={[styles.msgText, { color: mine ? colors.onBrandTertiary : colors.onSurface }]}>{item.text}</Text>
                   ) : null}
 
@@ -318,7 +353,7 @@ export default function ChatDetail() {
                     ) : null}
                   </View>
 
-                  {reactionEntries.length > 0 ? (
+                  {!item.is_deleted && reactionEntries.length > 0 ? (
                     <View style={[styles.reactionsBar, { backgroundColor: colors.surface, borderColor: colors.divider }]}>
                       {reactionEntries.map(([emoji, users]) => (
                         <Pressable
@@ -415,7 +450,10 @@ export default function ChatDetail() {
         myUserId={user?.id}
         onReact={reactTo}
         onReply={(m) => setReplyingTo(m)}
+        onForward={(m) => forwardRef.current?.open(m)}
+        onDelete={deleteForEveryone}
       />
+      <ForwardPickerSheet ref={forwardRef} myUserId={user?.id} />
     </KeyboardAvoidingView>
   );
 }
@@ -439,6 +477,10 @@ const styles = StyleSheet.create({
   replyQuote: { paddingHorizontal: spacing.sm, paddingVertical: 6, borderLeftWidth: 3, borderRadius: 6, marginBottom: 4 },
   replyName: { fontSize: 12, fontWeight: "700" },
   replyText: { fontSize: 12, marginTop: 1 },
+  forwardedRow: { flexDirection: "row", alignItems: "center", gap: 4 },
+  forwardedText: { fontSize: 11, fontStyle: "italic" },
+  deletedRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  deletedText: { fontSize: 14, fontStyle: "italic", opacity: 0.75 },
   reactionsBar: {
     position: "absolute", bottom: -14, right: 6, flexDirection: "row",
     paddingHorizontal: 6, paddingVertical: 3, borderRadius: 14,

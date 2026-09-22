@@ -117,7 +117,14 @@ export default function ChatsScreen() {
             const other = item.kind === "direct" ? item.members.find((m) => m.id !== user?.id) : null;
             const title = item.kind === "group" ? (item.name ?? "Grup") : (other?.name ?? "Kontak");
             const avatarPath = item.kind === "group" ? item.avatar_path : other?.avatar_path ?? null;
-            const preview = item.last_message?.text ?? (item.last_message?.media_type ? `📎 ${item.last_message.media_type}` : "Belum ada pesan");
+            const preview =
+              item.last_message?.is_deleted
+                ? "🚫 Pesan ini telah dihapus"
+                : item.last_message?.text
+                  ? item.last_message.text
+                  : item.last_message?.media_type
+                    ? `📎 ${item.last_message.media_type}`
+                    : "Belum ada pesan";
             return (
               <Pressable
                 testID={`chat-row-${item.id}`}

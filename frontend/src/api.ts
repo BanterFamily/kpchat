@@ -86,6 +86,8 @@ export type Message = {
     media_type: string | null;
   } | null;
   reactions?: Record<string, string[]>;
+  is_deleted?: boolean;
+  forwarded?: boolean;
 };
 
 export type Chat = {
@@ -102,6 +104,7 @@ export type Chat = {
     media_type: string | null;
     sender_id: string;
     created_at: string;
+    is_deleted?: boolean;
   } | null;
   unread_count: number;
   updated_at: string;

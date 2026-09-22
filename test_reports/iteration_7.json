@@ -1,0 +1,31 @@
+{
+  "summary": "Iteration 7 verifies (1) Delete-for-Everyone (soft-delete, sender-only, 5-min window) and (2) Forward Message features. Backend: 17/17 pytest cases PASSED in /app/backend/tests/test_delete_forward.py covering — DELETE happy path (soft-delete sets deleted_at, response has is_deleted=true and text/media_path/media_type/reply_to nulled + reactions={}); DELETE persistence via GET /api/chats/{id}/messages (message still present with is_deleted=true and no content); DELETE by non-sender member → 403 'Hanya pengirim yang dapat menghapus pesan ini'; DELETE by non-member → 404; DELETE already-deleted → 400 'sudah dihapus'; DELETE > 5 min (backdated via pymongo) → 400 with 'Pesan terlalu lama untuk dihapus (batas 5 menit)'; GET /api/chats last_message.is_deleted=true and text/media_type null when newest msg deleted; WS broadcast on DELETE emits {type:'message', data:{_event:'deleted', is_deleted:true, id:<msg>}} to all chat members. FORWARD: happy path returns list of MessageOut with forwarded=true, chat_id=target, text preserved, reply_to=null, reactions={}, read_by=[sender]; cannot forward deleted → 400; non-member of source chat → 403; all-invalid targets → 404; mixed valid+non-member targets → non-member silently filtered, only valid one created; reactions & reply_to are NOT copied to forwarded message; WS broadcast to target chat members carries forwarded=true. REGRESSION: new send_message defaults is_deleted=false / forwarded=false; react and reply flows still work with new fields. Frontend source review confirmed all required testIDs and copy: bubble-<id> (chat/[id].tsx:292), deleted-<id> tombstone (line 314) with correct 'Kamu menghapus pesan ini' vs 'Pesan ini telah dihapus' branching (line 317), action-reply/action-forward/action-delete (MessageActionsSheet 99/112/126) with canDelete = isMine && !isDeleted && withinDeleteWindow gate, 'Diteruskan' + arrow-redo header on forwarded bubbles (307-310), ForwardPickerSheet title 'Teruskan ke…' (99), forward-target-<chatId> toggling (125), forward-send-button FAB with 'Kirim (N)' label (147/154), Alert.alert confirmation before DELETE (chat/[id].tsx:224-235), and chat-list preview '🚫 Pesan ini telah dihapus' (chats.tsx:122) driven from ChatOut.last_message.is_deleted. Web preview home page loads cleanly with no red-screen errors — only known react-native-web deprecation warnings (shadow*/pointerEvents).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_delete_forward.py",
+    "/app/test_reports/pytest/iter7_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 1101 lines and still uses deprecated @app.on_event startup/shutdown; migrate to FastAPI lifespan + split into routers (messages/, chats/, auth/, files/) — repeated finding from earlier iterations.",
+    "DELETE window is enforced only by server clock via `now - created_at`; MessageActionsSheet computes the same window client-side using `Date.now() - new Date(created_at)`. Client clock drift may briefly show/hide the Delete action but the server still authoritatively rejects >5min, so safe.",
+    "ForwardPickerSheet.submit() closes the sheet on success but does not surface a toast/confirmation; consider a lightweight success indicator (nice-to-have UX).",
+    "ForwardIn currently caps chat_ids at 10 (max_length=10 in the Pydantic model); undocumented in the request spec but a reasonable safety limit — mention in API docs.",
+    "chat/[id].tsx uses local var name `forwardRef` for a useRef, which shadows React's `forwardRef` HOC name; not currently imported in this file so harmless, but confusing — consider renaming to `forwardPickerRef`."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_delete_forward.py (new)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "source-reviewed; smoke load ok. End-to-end authenticated Playwright not exercised due to expo-secure-store polyfill (same limitation documented in iteration 6)."},
+  "seed_data_creation": "Three fresh users (TEST_Alice/Bob/Carol) created per-run via OTP dev_code flow using unique digits-only phones seeded from time.time()*1000 + random suffix. Multiple direct chats created between (A,B) and (A,C) plus one (B,C) for non-member forward filtering.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run: EXPO_PUBLIC_BACKEND_URL=<public> MONGO_URL=... DB_NAME=whatsapp_clone pytest /app/backend/tests/test_delete_forward.py -v -n 0 --junitxml=/app/test_reports/pytest/iterN_results.xml . Requires pymongo (already installed) + websockets. The `test_delete_older_than_window_returns_400` test uses direct pymongo access to backdate `created_at`; if MONGO_URL is unreachable from the test host, that single test will fail while the endpoint itself remains correct. Frontend E2E for the new bottom sheets should drive the actual OTP + verify flow (do NOT inject a token into localStorage — the app uses expo-secure-store polyfill on web, so injected tokens yield 401).",
+  "rca_of_issue": "N/A — no bugs found. Both features fully implemented per spec on both backend and frontend."
+}

@@ -226,6 +226,10 @@ class ReactIn(BaseModel):
     emoji: str
 
 
+class ForwardIn(BaseModel):
+    chat_ids: List[str] = Field(min_length=1, max_length=10)
+
+
 class MessageOut(BaseModel):
     id: str
     chat_id: str
@@ -238,6 +242,8 @@ class MessageOut(BaseModel):
     read_by: List[str]
     reply_to: Optional[ReplyPreview] = None
     reactions: Dict[str, List[str]] = Field(default_factory=dict)
+    is_deleted: bool = False
+    forwarded: bool = False
 
 
 # ----------------------------- HELPERS ----------------------------- #
@@ -485,12 +491,14 @@ async def _build_chat_out(chat: dict, viewer_id: str) -> ChatOut:
     )
     last_msg = None
     if last:
+        is_deleted = last.get("deleted_at") is not None
         last_msg = {
             "id": last["id"],
-            "text": last.get("text"),
-            "media_type": last.get("media_type"),
+            "text": None if is_deleted else last.get("text"),
+            "media_type": None if is_deleted else last.get("media_type"),
             "sender_id": last["sender_id"],
             "created_at": _iso(last["created_at"]),
+            "is_deleted": is_deleted,
         }
     unread = await db.messages.count_documents(
         {
@@ -647,24 +655,30 @@ async def remove_member(chat_id: str, member_id: str, user=Depends(get_current_u
 
 
 # ----------------------------- MESSAGES ----------------------------- #
+DELETE_WINDOW_SECONDS = 5 * 60
+
+
 def _msg_to_out(m: dict, viewer_id: Optional[str] = None, private_ids: Optional[Set[str]] = None) -> MessageOut:
     reply = m.get("reply_to")
     read_by = list(m.get("read_by", []))
     if private_ids:
         # Hide reads from users whose read_receipts_enabled is false, except the viewer themselves.
         read_by = [uid for uid in read_by if uid == viewer_id or uid not in private_ids]
+    deleted = m.get("deleted_at") is not None
     return MessageOut(
         id=m["id"],
         chat_id=m["chat_id"],
         sender_id=m["sender_id"],
-        text=m.get("text"),
-        media_path=m.get("media_path"),
-        media_type=m.get("media_type"),
-        audio_duration_ms=m.get("audio_duration_ms"),
+        text=None if deleted else m.get("text"),
+        media_path=None if deleted else m.get("media_path"),
+        media_type=None if deleted else m.get("media_type"),
+        audio_duration_ms=None if deleted else m.get("audio_duration_ms"),
         created_at=_iso(m["created_at"]),
         read_by=read_by,
-        reply_to=ReplyPreview(**reply) if reply else None,
-        reactions=m.get("reactions", {}),
+        reply_to=None if deleted else (ReplyPreview(**reply) if reply else None),
+        reactions={} if deleted else m.get("reactions", {}),
+        is_deleted=deleted,
+        forwarded=bool(m.get("forwarded", False)),
     )
 
 
@@ -774,6 +788,88 @@ async def react_to_message(message_id: str, body: ReactIn, user=Depends(get_curr
     out = _msg_to_out(updated, viewer_id=user["id"], private_ids=private_ids)
     await manager.broadcast_chat(chat, {**out.dict(), "_event": "reaction"})
     return out
+
+
+@api.delete("/messages/{message_id}", response_model=MessageOut)
+async def delete_message(message_id: str, user=Depends(get_current_user)):
+    """Soft-delete a message ("Hapus untuk Semua Orang").
+
+    - Only the sender may delete.
+    - Only within the 5-minute window since creation.
+    - Marks the doc as deleted (soft-delete per data-management rules) and blanks
+      the content in the API response so all members see a tombstone.
+    """
+    msg = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    if not msg:
+        raise HTTPException(status_code=404, detail="Pesan tidak ditemukan")
+    chat = await db.chats.find_one({"id": msg["chat_id"]})
+    if not chat or user["id"] not in chat["member_ids"]:
+        raise HTTPException(status_code=404, detail="Pesan tidak ditemukan")
+    if msg["sender_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Hanya pengirim yang dapat menghapus pesan ini")
+    if msg.get("deleted_at"):
+        raise HTTPException(status_code=400, detail="Pesan sudah dihapus")
+    created_at = msg["created_at"]
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - created_at).total_seconds()
+    if age > DELETE_WINDOW_SECONDS:
+        raise HTTPException(status_code=400, detail="Pesan terlalu lama untuk dihapus (batas 5 menit)")
+
+    await db.messages.update_one(
+        {"id": message_id},
+        {"$set": {"deleted_at": datetime.now(timezone.utc)}},
+    )
+    updated = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    private_ids = await _private_read_receipt_ids(chat["member_ids"])
+    out = _msg_to_out(updated, viewer_id=user["id"], private_ids=private_ids)
+    await manager.broadcast_chat(chat, {**out.dict(), "_event": "deleted"})
+    return out
+
+
+@api.post("/messages/{message_id}/forward", response_model=List[MessageOut])
+async def forward_message(message_id: str, body: ForwardIn, user=Depends(get_current_user)):
+    """Duplicate a message into each target chat the user belongs to."""
+    src = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    if not src:
+        raise HTTPException(status_code=404, detail="Pesan tidak ditemukan")
+    if src.get("deleted_at"):
+        raise HTTPException(status_code=400, detail="Pesan yang dihapus tidak dapat diteruskan")
+    # The sender must be a member of the source chat.
+    src_chat = await db.chats.find_one({"id": src["chat_id"]})
+    if not src_chat or user["id"] not in src_chat["member_ids"]:
+        raise HTTPException(status_code=403, detail="Tidak diizinkan meneruskan pesan ini")
+
+    target_chats = await db.chats.find(
+        {"id": {"$in": body.chat_ids}, "member_ids": user["id"]}
+    ).to_list(50)
+    if not target_chats:
+        raise HTTPException(status_code=404, detail="Tidak ada chat tujuan yang valid")
+
+    now = datetime.now(timezone.utc)
+    out_list: List[MessageOut] = []
+    for target in target_chats:
+        new_doc = {
+            "id": str(uuid.uuid4()),
+            "chat_id": target["id"],
+            "sender_id": user["id"],
+            "text": src.get("text"),
+            "media_path": src.get("media_path"),
+            "media_type": src.get("media_type"),
+            "audio_duration_ms": src.get("audio_duration_ms"),
+            "created_at": now,
+            "read_by": [user["id"]],
+            "reply_to": None,
+            "reactions": {},
+            "forwarded": True,
+        }
+        await db.messages.insert_one(new_doc)
+        await db.chats.update_one({"id": target["id"]}, {"$set": {"updated_at": now}})
+        private_ids = await _private_read_receipt_ids(target["member_ids"])
+        out = _msg_to_out(new_doc, viewer_id=user["id"], private_ids=private_ids)
+        out_list.append(out)
+        await manager.broadcast_chat(target, out.dict())
+    return out_list
 
 
 # ----------------------------- FILES ----------------------------- #
